@@ -1,0 +1,17 @@
+# Chunk manifest — machine-readable index of all modules in this project.
+# Update this file each time a chunk changes status or a new one is added.
+# Reference issue numbers for feedback; update DOIs after each Zenodo release.
+
+- name: Tradeable jobs
+  slug: tradeable-jobs
+  status: draft          # draft | stable | superseded
+  canonical_url:         # docs/chunks/tradeable_jobs/ on GitHub Pages, once the chunk has an index.html
+  doi:                   # Fill in after first Zenodo release containing this module
+  dependencies:
+    - code/tradeable_jobs/
+  paper_section:
+  feedback_from: []      # Log engagement, e.g.:
+    # - org: ONS Subnational
+    #   date: 2025-03-15
+    #   issue: 12
+    #   summary: "Confirmed LA-level data available from 2024"

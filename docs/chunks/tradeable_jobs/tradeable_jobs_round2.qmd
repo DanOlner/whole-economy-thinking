@@ -1,0 +1,1228 @@
+---
+title: "Tradeable jobs, round 2: where the national gain from productivity sits"
+subtitle: "Working note: supply chains, production chains, payment flows and firm data, and Rice and Venables's model with supply chains (tests T1–T6, T8–T11)"
+author: "Drafted by Claude Code (Claude Opus 5.5) for Dan Olner"
+date: 2026-11-14
+date-format: "D MMMM YYYY"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    output-file: tradeable_jobs_round2.html
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+    fig-dpi: 150
+execute:
+  echo: false
+  message: false
+  warning: false
+---
+
+```{r}
+#| label: setup
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(knitr)
+  library(ggrepel)
+})
+options(scipen = 999)
+
+# The scripts use paths relative to the project root; this file lives in docs/chunks/tradeable_jobs/
+doc_dir <- normalizePath('.')
+knitr::opts_knit$set(root.dir = normalizePath('../../..'))
+
+# Colours as in round 1: reference categorical palette in fixed order, ink and grid greys
+cat_cols <- c('#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4')
+ink <- '#0b0b0b'; ink_2 <- '#52514e'; muted <- '#898781'; grid_col <- '#e1e0d9'; surface <- '#fcfcfb'
+
+theme_note <- function() {
+  theme_minimal(base_size = 11) +
+    theme(plot.background = element_rect(fill = surface, colour = NA),
+          panel.grid.major = element_line(colour = grid_col, linewidth = 0.3),
+          panel.grid.minor = element_blank(),
+          axis.text = element_text(colour = ink_2), axis.title = element_text(colour = ink_2),
+          plot.title = element_text(colour = ink, face = 'bold', size = 12),
+          plot.subtitle = element_text(colour = ink_2, size = 10),
+          plot.caption = element_text(colour = muted, size = 8, hjust = 0),
+          strip.text = element_text(colour = ink, face = 'bold', hjust = 0),
+          legend.position = 'top', legend.justification = 'left',
+          legend.text = element_text(colour = ink_2), legend.title = element_text(colour = ink_2))
+}
+num <- function(x, digits = 0) format(round(x, digits), big.mark = ',', nsmall = digits, scientific = FALSE)
+pct <- function(x, digits = 0) paste0(num(100 * x, digits), '%')
+
+found_levels <- c('Tradable or basic', 'Business services', 'Material foundational', 'Everyday services', 'Housing',
+                  'Providential (held fixed)')
+found_cols <- setNames(c(cat_cols, muted), found_levels)
+```
+
+```{r}
+#| label: run-analysis
+#| include: false
+
+# Cached in local/tradeable_jobs/cache/. Needs round 1's outputs/uk_sectors.csv (09_uk_sparsity.R).
+# 13 needs the Companies House report outputs on this machine; without them it does nothing, and
+# section 8 says so instead of showing results.
+for (s in c('12_t2_domar_tradability.R', '13_t11a_firm_aggregates.R')) source(file.path('code/tradeable_jobs', s))
+has_ch <- exists('t11a')
+if (has_ch) t11a_builds <- builds
+```
+
+```{r}
+#| label: key-numbers
+
+pr <- t2_products %>% mutate(market = !group %in% c('public_providential', 'excluded'))
+mk <- pr %>% filter(market)
+lev_total <- sum(mk$domar_net)
+lev_by <- function(var) mk %>% group_by(class = .data[[var]]) %>%
+  summarise(lev = sum(domar_net), va = sum(va_share), jobs = sum(employees),
+            exports_embodied = sum(dest_exports * output) / sum(output), n = n(), .groups = 'drop') %>%
+  mutate(lev_share = lev / lev_total, job_share = jobs / sum(jobs))
+reach_tab <- lev_by('reach'); limit_tab <- lev_by('limit'); found_tab <- lev_by('foundational')
+rs <- function(cls, col = 'lev_share') reach_tab[[col]][reach_tab$class == cls]
+ls_ <- function(cls, col = 'lev_share') limit_tab[[col]][limit_tab$class == cls]
+fs <- function(cls, col = 'lev_share') found_tab[[col]][found_tab$class == cls]
+
+gr <- t2_groups %>% filter(!group %in% c('excluded'))
+g <- function(id, col) gr[[col]][gr$group == id]
+gm <- gr %>% filter(group != 'public_providential') %>% arrange(desc(domar_net))
+ratio <- gm %>% mutate(r = domar / va_share) %>% arrange(desc(r))
+```
+
+## The answer so far
+
+```{r}
+#| label: synthesis-setup
+#| include: false
+for (s in c('14_t4_payment_tradability.R', '15_t3_chain_labour.R', '16_modelF.R', '16b_modelF_closure.R', '17_t6_own_jobs.R',
+            '18_t5_local_sourcing.R', '19_t10_breakeven.R', '20_t11b_moments.R', '21_modelF_demand.R', '22_flow_model.R',
+            '23_t9_flow_slack.R', '24_modelF_local_sigma.R', '25_modelA_supply_chains.R', '26_modelF_agglomeration.R', '27_solvers.R',
+            '28_strong_agglomeration_draws.R'))
+  invisible(capture.output(source(file.path('code/tradeable_jobs', s))))
+px <- c('P2', 'P3', 'P4')
+be_row <- function(label, f) tibble(Setting = label, `Long tail` = num(f('P2'), 2), `Upstream business-to-business` = num(f('P3'), 2),
+                                    `Local services` = num(f('P4'), 2))
+pick <- function(d, px, col = 'breakeven', exp_col = 'experiment') {   # P4 also matches 'P4 with P9', which has no ratio
+  v <- d[[col]][grepl(paste0('^', px, ' '), d[[exp_col]]) & !grepl('with P9', d[[exp_col]])]; mean(v) }
+syn_be <- bind_rows(
+  be_row('Default demand, foreign demand fixed', function(p) pick(t10$national %>% filter(mobility == 'frechet'), p, 'breakeven_mean')),
+  be_row("Default demand, Rice and Venables's closure", function(p) pick(mf_closure_proxies %>% filter(mobility == 'frechet', grepl('Rice', closure)), p, 'breakeven_vs_P1', 'proxy')),
+  be_row('Demand fitted to T6, foreign demand fixed', function(p) pick(md_breakeven %>% filter(mobility == 'frechet', grepl('Calibrated', demand), grepl('fixed', closure)), p)),
+  be_row("Demand fitted to T6, Rice and Venables's closure", function(p) pick(md_breakeven %>% filter(mobility == 'frechet', grepl('Calibrated', demand), grepl('Rice', closure)), p)),
+  be_row('Fitted demand, local services less price-sensitive between places', function(p) pick(ls_breakeven %>% filter(mobility == 'frechet', grepl('services 3', variant)), p)),
+  be_row('The same, with agglomeration 0.03', function(p) pick(ag_breakeven %>% filter(mobility == 'frechet', kappa == 0.03), p)),
+  local({ sdp <- function(p) { r <- sd_by_proxy[grepl(paste0('^', p, ' '), sd_by_proxy$proxy), ]
+            paste0(num(r$breakeven_mean, 2), ' (', num(r$breakeven_min, 2), '–', num(r$breakeven_max, 2), ')') }
+    tibble(Setting = paste0('The same, agglomeration 0.3: mean (range) over ', nrow(sd_policies) / 4, ' starting equilibria in ', nrow(sd_summary), ' draws'),
+           `Long tail` = sdp('P2'), `Upstream business-to-business` = sdp('P3'), `Local services` = sdp('P4')) }))
+cu_syn <- t11a$catchup %>% filter(!group %in% c('public_providential', 'excluded'))
+syn_room <- sum(cu_syn$national_tail_halfway, na.rm = TRUE) / sum(cu_syn$national_top10_plus10, na.rm = TRUE)
+syn_t6 <- function(term) t6$regs$estimate[t6$regs$sample == 'Stacked 5-year differences, slope by reach' & t6$regs$term == term]
+ls_loc <- ls_e2 %>% filter(grepl('services 3', variant), group %in% ls$local)
+syn_land <- median(mf_e1$land_share[mf_e1$supply_chains & mf_e1$mobility == 'frechet'])
+fxs <- function(pol, eco, col) t9f[[col]][grepl(pol, t9f$policy, fixed = TRUE) & grepl(eco, t9f$economy) & t9f$place == 'all' & grepl('Extended', t9f$version)]
+```
+
+Your hypothesis was that "tradables first, then hope for trickle-down" doesn't stack up, given what productivity in the much broader set of other sectors could do. Round 2 tested it four ways:
+
+- the input–output tables;
+- UK firm data;
+- Rice and Venables's model with supply chains (Model F);
+- the flow model in R.
+
+**1. As a national priority rule, "tradables first" doesn't hold.**
+
+- **Most of the economy's leverage is outside the exported products.** Products exporting a quarter or more of their output carry `r pct(rs('International'))` of the market economy's first-order gain from productivity (T2, section 2). Construction, professional services, finance and wholesale carry the biggest weights, on both sides of the tradable line.
+- **Business-to-business sectors feed exporters.** 35–45% of a gain in transport, wholesale, support, professional or financial services ends up in cheaper exports (section 4). About half the jobs behind manufactured products are in other sectors (T3, section 10).
+- **The long tail has far more room than the frontier.** In UK firm data, half-closing the gap to the median within industries is worth about `r num(syn_room, 1)` times a 10% gain for the top decile (T11a, section 8).
+- **Per point of productivity, the frontier push's lead is modest and conditional.** The table gives each broad policy's break-even cost ratio against a frontier push in tradables: a ratio of 0.8 means its points must be 20% cheaper to match.
+
+```{r}
+#| label: tbl-synthesis
+#| tbl-cap: "Break-even cost ratios against the frontier push (people mobile), across Model F's settings. Below 1: the policy's points must be that much cheaper to match the frontier push; above 1: it wins at equal cost per point."
+syn_be %>% kable(align = 'lrrr')
+```
+
+- **Reading the table.**
+    - With demand fitted to UK data, upstream business-to-business productivity is about level with the frontier push, under either trade closure.
+    - The long tail and local services need their points somewhat cheaper.
+    - The frontier push's lead was largest in the first, least realistic setting. It rests on export gains coming back as cheaper imports, and on demand far more price-sensitive than UK industries show.
+    - Strong agglomeration leaves the averages about where they were but widens the range, because a policy can tip the economy into another equilibrium (section 18).
+
+**2. But productivity in the broader sectors carries costs the shorthand misses.**
+
+- **It costs the improving sector jobs.** Across UK industries, 1997–2019, hours fell `r num(-syn_t6('reachbusiness to business:d_oph'), 2)` log points per point of productivity growth in business-to-business industries and `r num(-syn_t6('reachlocal services:d_oph'), 2)` in local services, against `r num(-syn_t6('reachtradable:d_oph'), 2)` in tradables (T6, section 12).
+    - Where people can move or find other work, that's the gain.
+    - Where they can't, it's a cost to exactly the people the hypothesis is meant to help.
+- **In a slack economy, productivity without demand costs jobs and measured GDP.** Real income rises only where the cheaper output is bought locally (flow model, section 17).
+- **The official lens hides the gain.** A place that makes its everyday services more productive shows lower measured GVA per worker while its residents' real income rises (T8, sections 11 and 17).
+- **Land and property take a large share either way.** About `r pct(syn_land)` of the national income gain goes to the local fixed factor in Model F, for tradable and non-tradable gains alike. Landowners are no more a problem for one than the other.
+
+**3. Local and national strategy align only in some conditions** (T9, sections 11 and 17).
+
+- **Local services, people staying put:** aligned. A lagging place keeps `r pct(min(ls_loc$lag_gain_share[ls_loc$mobility == 'immobile']))`–`r pct(max(ls_loc$lag_gain_share[ls_loc$mobility == 'immobile']))` of the gain from its own local services. But the national gain is small.
+- **Nationally traded business services:** local gain smaller than national. The gain spreads to buyers everywhere through prices, so no single place has much reason to pay for it. That's a case for national rather than local policy.
+- **People mobile:** a place keeps little of any productivity gain, at most `r pct(max(ls_loc$lag_gain_share[ls_loc$mobility == 'frechet']))` from local services. Migration and rents spread it.
+- **Demand-side policy:**
+    - When labour is slack, a place's own procurement keeps most of its gain (`r pct(fxs('D2t', 'Slack', 'town_share_of_real_gain'))` in the flow model) and costs no one.
+    - When labour is tight, it crowds out other places: the town gets `r pct(fxs('D2t', 'Tight', 'town_share_of_real_gain'))` of the national gain.
+
+**4. What this adds to round 1's question.**
+
+Round 1 asked whether the tradeable-jobs argument adds anything to Ricardo.
+
+- **Supply chains make the tradable/non-tradable split a poor guide** to where productivity matters. The split that does the work is:
+    - position in the supply chain;
+    - how price-sensitive demand is;
+    - whether people can move;
+    - whether the economy is slack.
+- **The biggest single modelling choice is a Ricardian one:** whether gains in exporters come back as cheaper imports (the terms of trade).
+- **Venables's "missing lever" doesn't work.** Cheaper local non-tradable inputs don't pull lagging places into tradables, in Model F or in his own city model with supply chains (section 11).
+- **Sparsity remains a measure of concentration, not tradability** (T4, round 1).
+
+**5. How sure to be.**
+
+- **Robust:**
+    - the spread of leverage across both sides of the tradable line;
+    - business-to-business sectors' reach into exports;
+    - the room in the long tail;
+    - the job losses outside tradables;
+    - the official lens disagreeing with real income;
+    - how mobility decides what stays local.
+- **Depends on modelling choices:**
+    - the per-point ranking, which turns on the trade closure and demand elasticities;
+    - everything with strong agglomeration, which is far stronger than empirical estimates. Over six productivity draws it makes a policy's effect depend on which equilibrium the economy starts in. The long-tail proxy tips the economy into another equilibrium from `r sum(sd_policies$switched[sd_policies$proxy == 'P2 long tail'])` of `r sum(sd_policies$proxy == 'P2 long tail')` starting points and gains from it. The frontier push does so from `r sum(sd_policies$switched[sd_policies$proxy == 'P1 frontier push'])`, the other two never (section 18).
+- **Unknown:** the cost of a point of productivity in each sector. Neither side has credible UK evidence (T10, section 14). That, not the models, is now the binding gap.
+
+## In brief
+
+- **The question.** The tradables-first argument says a place, or a country, does best by raising productivity in the sectors that sell outside it. Hulten's theorem gives the national, first-order answer to "where does a 1% productivity gain do the most good?" It is the sector's *Domar weight*: its gross output as a share of GDP, whoever buys it.
+- **Most of the leverage is outside the exported products.**
+    - These shares are of the market economy's leverage: Domar weights net of each product's sales to itself, with public administration, education, health, care and imputed rent left out.
+    - Products that export a quarter or more of their output carry `r pct(rs('International'))` of it.
+    - The rest is in products sold mainly to other businesses (`r pct(rs('Business to business'))`), to households (`r pct(rs('Households'))`), to investment (construction, `r pct(rs('Investment'))`), or to a mix (`r pct(rs('Mixed'))`).
+- **The big weights sit on both sides of the tradable line.**
+    - Construction has the largest weight of any market group (`r pct(g('construction', 'domar_net'), 1)` of GDP).
+    - Professional services, finance and wholesale come next, at 11–13% each. Finance and professional services are tradable by any measure.
+- **Business-to-business sectors reach exporters through the supply chain.** Transport exports `r pct(g('transport', 'export_share'))` of its output directly, but `r pct(g('transport', 'dest_exports'))` of a productivity gain there ends up in cheaper exports. For administrative and support services the figures are `r pct(g('admin_support', 'export_share'))` and `r pct(g('admin_support', 'dest_exports'))`.
+- **A correction to our own plan (W4).**
+    - A sector's Domar weight exceeds its value-added share because it *buys* a lot of inputs, not because it sells to other businesses.
+    - To first order, who the buyers are doesn't change the national total. It changes where the gain lands.
+    - So the sectors with the most leverage per £ of value added are manufacturing and utilities, which are input-heavy, not business services.
+- **Jobs and leverage differ (W7).** Everyday services (retail, hospitality, personal services) hold `r pct(fs('Everyday services', 'job_share'))` of market-sector employees but `r pct(fs('Everyday services'))` of the leverage. For the frontier tradables it is the other way round: `r pct(ls_('Tradable frontier', 'job_share'))` of employees, `r pct(ls_('Tradable frontier'))` of the leverage.
+- **What it can't say.** This is first order, national and at an equal percentage gain. It says nothing about:
+    - which places gain (T9);
+    - what a point of productivity costs in each sector (W7, T10);
+    - second-order effects, or markups (W8).
+- **For Model F.** It fixes 19 sector groups, their input coefficients and their final demand (section 6).
+- **Payments can't yet measure tradability within the UK (T4, section 9).** The payment-flow measure is stable but covers a small share of business-to-business sales and fails a check against Scotland's tables. Official estimates of trade between regions, by eight broad groups, are unrelated to sparsity.
+- **About half the jobs behind manufactured products are in other sectors (T3, section 10),** and most jobs embodied in UK exports are in services. On the whole-chain lens, GVA per job differs much less between tradable and non-tradable groups.
+- **The firm data (T11a, section 8)** `r if (has_ch) "back this up from another direction. Within each group, the long tail of firms below their industry's median has several times the room of a frontier push, jobs have been moving into the lowest-productivity group, and labour moves slowly to better firms." else "are not on this machine, so section 8 is empty in this build."`
+
+**The model with supply chains (Model F, sections 11 and 14–15).**
+
+- **Supply chains matter, but within the Domar weight.**
+    - National gains track Domar weights, at 0.8–1.4 times the Hulten prediction.
+    - Switching off domestic supply chains cuts the gain from construction, utilities and transport sharply. That is the hypothesis's channel, and it is real.
+    - But it doesn't add beyond what the Domar weight already says.
+- **How trade balances decides tradables against the rest.**
+    - If export gains turn into cheaper imports (Model F's closure), the frontier push gives the most per point of productivity. The long tail then needs points about a third cheaper to match it.
+    - In Rice and Venables's own closure, export gains are competed away, and the long tail, upstream and local services all beat the frontier push per point.
+- **Local and national strategy diverge, and mobility decides how.**
+    - With people mobile, a lagging place keeps little of the gain from improving any group: migration and rents spread it.
+    - With people immobile, it keeps most of the gain from local services (79–94%) and little from finance or chemicals, whose gains pass to buyers everywhere.
+- **The official lens misleads locally (T8).** Improving local services raises a place's real income but lowers its measured GVA per worker.
+- **Cheaper local inputs aren't the missing lever (C8).** Higher local wages and rents outweigh them.
+- **Productivity costs jobs outside tradables (T6).** In UK industries, 1997–2019, hours fall with productivity growth in business-to-business and local services, much less in tradables. Model F's Cobb–Douglas demand misses this.
+- **Everyday services don't buy more locally than tradables (T5).** The material sectors and local production do.
+- **Model F's revenue productivity looks like UK firms' (T11b),** across places, sectors and place by sector.
+- **With demand calibrated to T6 (section 16),** productivity costs jobs outside tradables in the model too. National gains fall to about 0.7 of Hulten everywhere, and the frontier push's lead per point mostly goes: upstream business-to-business productivity is about level with it under either closure.
+- **The flow model is now in R (F0, section 17),** reproducing the TypeScript build row for row. In its demand-constrained economy:
+    - local procurement keeps about three-quarters of its gain in the place that does it;
+    - productivity gains with demand unchanged cost jobs and measured GDP;
+    - productivity in local services still raises real income there, through lower prices, while the official lens shows a fall.
+- **With wages that respond to unemployment and price-elastic exports (section 17),** the flow model can be tight. A place's own procurement then crowds out other places (it gets 130% of the national gain), and its everyday-services productivity no longer pays it.
+- **In Venables's city model (section 11),** supply chains shift the equilibrium range towards fewer tradable cities. Cheaper non-tradable inputs raise real income but are no escape from lock-in.
+- **Weak agglomeration in Model F (section 16)** tilts the comparison slightly towards the frontier push and leaves local shares unchanged.
+- **New solvers find multiple equilibria (section 18).**
+    - Hill climbing, residual search, brute force and continuation.
+    - On a test case they find what theory predicts, where the model's own solver settles on an unstable equilibrium.
+    - On the full Model F they solve agglomeration up to 0.3, where the old solver failed above 0.02, and find up to four stable equilibria.
+    - The long-tail proxy's value then depends on which equilibrium the economy starts in.
+- **What isn't done (section 19):** the flow model's lenses, and regional coefficients.
+
+## 1. What was done
+
+- **Data.** The ONS input–output analytical tables for 2019, product by product: 105 products, £ million at basic prices. Only domestic flows are in the inter-product block; imports are a separate table.
+- **Domar weight.** Gross output over total GVA (£`r num(t2$gdp / 1000)`bn). The weights sum to `r num(sum(pr$domar), 2)`, not 1, because output counts intermediate sales.
+    - The *net* weight leaves out sales within the product or group.
+    - Construction sells `r pct(g('construction', 'within_group'))` of its output to construction, and utilities `r pct(g('utilities', 'within_group'))` to utilities.
+    - Net and gross give the same gain for the same physical change. They differ in what "1%" means, and the net weight matches how sector productivity is usually measured.
+- **Where a gain lands.**
+    - A 1% cost fall in product *j* lowers the price of each final product *k* by $L_{jk}$%, where $L$ is the Leontief inverse.
+    - So final buyers of *k* gain $L_{jk} F_k$, and summed over *k* that is exactly *j*'s output.
+    - Splitting final demand *F* by buyer (households, government, investment, exports) gives the share of *j*'s gain that lands on each. The export share of this is *j*'s **embodied export share**.
+- **Linkages.**
+    - Upstreamness: the row sums of the Ghosh inverse, Antràs et al.'s (2012) measure without its open-economy correction. 1 means everything goes to final demand; higher means further from it.
+    - The backward linkage: the column sums of the Leontief inverse.
+- **Market reach.** Each product is classed by its sales:
+    - **International:** exports at least 25% of total use;
+    - otherwise by the biggest buyer, when it takes at least half: business to business, households, government or investment;
+    - **Mixed:** everything else.
+- **Employment.**
+    - BRES 2019 employees by SIC 3-digit group, shared across the products each group links to, in proportion to GVA.
+    - Sparsity (round 1's sector skewness SK) follows the same shares.
+
+## 2. Where the leverage sits
+
+```{r}
+#| label: tbl-reach
+#| tbl-cap: "The market economy's national leverage, by market reach and by what limits productivity. Leverage is the Domar weight net of within-product sales, so the national first-order gain from a 1% gain in every product in the class, as % of GDP. Public administration, education, health, care and imputed rent are left out."
+
+bind_rows(
+  reach_tab %>% mutate(dim = 'Market reach (from the tables)'),
+  limit_tab %>% mutate(dim = 'What limits productivity (hand-assigned)')) %>%
+  group_by(dim) %>% arrange(desc(lev), .by_group = TRUE) %>% ungroup() %>%
+  transmute(` ` = dim, Class = class, Products = n,
+            `Leverage, % of GDP` = num(100 * lev, 1), `Share of leverage` = pct(lev_share),
+            `Value added, % of GDP` = num(100 * va, 1), `Share of employees` = pct(job_share),
+            `Gain landing on exports` = pct(exports_embodied)) %>%
+  mutate(` ` = ifelse(duplicated(` `), '', ` `)) %>%
+  kable(align = 'llrrrrrr')
+```
+
+- **The international products carry about a third of the leverage** (`r pct(rs('International'))`), and `r pct(rs('International', 'job_share'))` of market-sector employees. The products that export less than a quarter of their output carry the other `r pct(1 - rs('International'))`.
+- **The hand-assigned types split the same way.**
+    - The tradable frontier (`r pct(ls_('Tradable frontier'))`) and catch-up (`r pct(ls_('Catch-up'))`) carry almost equal leverage. Catch-up is ordinary manufacturing, distribution, construction, transport, utilities and support services.
+    - Local-demand services carry `r pct(ls_('Limited by local demand'))`.
+- **The expectation in the plan was partly right.** Construction does top the market groups. But the next three are professional services, finance and wholesale, and two of those are tradable. Wholesale is also more exported than its label suggests (`r pct(g('wholesale_motor', 'export_share'))` of its output), because margins on exported goods count as wholesale exports.
+
+```{r}
+#| label: fig-domar
+#| fig-height: 6.2
+#| fig-cap: "Domar weight (net of each product's sales to itself) against exports, for 103 products. Left: exports as a share of the product's sales. Right: the share of a productivity gain in the product that ends up in cheaper exports, directly or through the supply chain. Points are sized by BRES employees. Imputed rent and households as employers are left out."
+
+d <- pr %>% filter(group != 'excluded') %>%
+  mutate(foundational = factor(foundational, levels = found_levels),
+         short = recode(cpa, 'CPA_F41, F42 & F43' = 'Construction', CPA_G46 = 'Wholesale', CPA_G47 = 'Retail',
+                        CPA_L68BXL683 = 'Real estate (rents)', CPA_I56 = 'Restaurants and bars', CPA_K64 = 'Banking',
+                        CPA_J62 = 'Computer services', CPA_K66 = 'Auxiliary finance', CPA_M70 = 'Head offices, consulting',
+                        .default = str_trunc(name, 24))) %>%
+  select(cpa, short, foundational, domar_net, employees, `Exports as a share of sales` = export_share,
+         `Share of the gain landing on exports` = dest_exports) %>%
+  pivot_longer(c(`Exports as a share of sales`, `Share of the gain landing on exports`), names_to = 'measure', values_to = 'x')
+# label the largest market products; the providential ones (held fixed) are drawn underneath, unlabelled
+lab <- d %>% filter(foundational != 'Providential (held fixed)') %>% group_by(measure) %>%
+  slice_max(domar_net, n = 8) %>% ungroup()
+d <- d %>% arrange(foundational != 'Providential (held fixed)', desc(employees))
+
+ggplot(d, aes(x, domar_net)) +
+  geom_point(aes(size = employees, fill = foundational), shape = 21, colour = surface, stroke = 0.5, alpha = 0.9) +
+  geom_text_repel(data = lab, aes(label = short), size = 2.7, colour = ink_2, min.segment.length = 0.2,
+                  segment.colour = muted, segment.size = 0.3, box.padding = 0.35, seed = 1, max.overlaps = 30) +
+  facet_wrap(~ measure) +
+  scale_x_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_y_log10(labels = function(v) paste0(v * 100, '%'), breaks = c(0.0003, 0.001, 0.003, 0.01, 0.03, 0.1)) +
+  scale_fill_manual(values = found_cols, drop = FALSE, name = NULL) +
+  scale_size_area(max_size = 11, labels = scales::comma, name = 'Employees', breaks = c(2e5, 1e6, 2e6)) +
+  guides(fill = guide_legend(override.aes = list(size = 4), nrow = 3, order = 1),
+         size = guide_legend(order = 2, override.aes = list(fill = muted, colour = surface))) +
+  labs(x = NULL, y = 'Domar weight, net (log scale)') +
+  theme_note() + theme(legend.box = 'horizontal')
+```
+
+- **Counting the supply chain shifts the business-to-business products right.**
+    - At the group level, each of these gains 14 to 21 percentage points of reach into exports: wholesale (`r pct(g('wholesale_motor', 'export_share'))` to `r pct(g('wholesale_motor', 'dest_exports'))`), transport, finance, professional and support services.
+    - Construction and retail stay at about 5%.
+- **A caveat on the right-hand panel.**
+    - A cost fall that lands on exports helps UK residents only if export prices are set abroad. Then the gain shows up as higher margins and wages.
+    - If exporters pass it on in lower prices, part of the gain goes to foreign buyers.
+    - Neither the tables nor Hulten's theorem settle which.
+
+## 3. Leverage against value added and jobs
+
+```{r}
+#| label: fig-groups
+#| fig-height: 6.4
+#| fig-cap: "The 19 sector groups: leverage (Domar weight net of within-group sales, % of GDP), value added (% of GDP) and employees (% of all GB employees). Groups are ordered by leverage. The providential group is held fixed in Model F."
+
+d <- gr %>% mutate(group_name = fct_reorder(group_name, domar_net)) %>%
+  transmute(group_name, `Leverage (net Domar weight)` = domar_net, `Value added share` = va_share, `Share of employees` = emp_share) %>%
+  pivot_longer(-group_name) %>%
+  mutate(name = factor(name, levels = c('Leverage (net Domar weight)', 'Value added share', 'Share of employees')))
+
+ggplot(d, aes(value, group_name)) +
+  geom_line(aes(group = group_name), colour = grid_col, linewidth = 1.2) +
+  geom_point(aes(fill = name), shape = 21, colour = surface, stroke = 0.6, size = 3) +
+  scale_fill_manual(values = cat_cols[1:3], name = NULL) +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0.01, 0.04))) +
+  labs(x = NULL, y = NULL) + theme_note()
+```
+
+- **Leverage per £ of value added varies by a factor of two.** The ratio of gross Domar weight to value added share is highest in the input-heavy groups:
+    - `r paste0(str_to_lower(ratio$group_name[1:3]), ' (', num(ratio$domar[1:3] / ratio$va_share[1:3], 1), ')', collapse = ', ')`.
+    - It is lowest in `r paste0(str_to_lower(tail(ratio$group_name, 3)), ' (', num(tail(ratio$domar / ratio$va_share, 3), 1), ')', collapse = ', ')`.
+- **This is the W4 correction.** Gross output is value added plus purchased inputs, so the Domar weight rewards *buying* from others.
+    - Two sectors with the same output and value added have the same weight, whether they sell to households or to other firms.
+    - Upstream position matters for where a gain lands and whose costs fall (section 4), not for the national total, to first order.
+- **What "1%" means changes the ranking.**
+    - If a policy raises *gross-output* productivity by 1%, the national gain is the Domar weight.
+    - If it raises *value added per worker* by 1%, with inputs unchanged, the gain is the value-added share.
+    - The plan's policy proxies should say which they mean. Section 6's coefficients let Model F do either.
+- **Employment is a poor guide to leverage.**
+    - Retail and hospitality have about twice the share of employees that they have of value added.
+    - Finance, utilities, real estate and chemicals have the opposite: two to three times more value added than employees.
+
+## 4. Where a gain lands
+
+```{r}
+#| label: fig-dest
+#| fig-height: 6
+#| fig-cap: "Where a 1% productivity gain in each group ends up: the share of the price fall that reaches each type of final buyer, directly or through the supply chain. Groups are ordered by the share landing on exports."
+
+d <- gr %>% mutate(group_name = fct_reorder(group_name, dest_exports)) %>%
+  select(group_name, Households = dest_households, `Government and NPISH` = dest_government,
+         Investment = dest_investment, Exports = dest_exports) %>%
+  pivot_longer(-group_name) %>%
+  mutate(name = factor(name, levels = c('Households', 'Government and NPISH', 'Investment', 'Exports')))
+
+ggplot(d, aes(value, group_name, fill = name)) +
+  geom_col(width = 0.75, colour = surface, linewidth = 0.5, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = cat_cols[1:4], name = NULL) +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.03))) +
+  labs(x = NULL, y = NULL) + theme_note()
+```
+
+- **Households take most of the gain from the everyday sectors:** retail, hospitality, personal services and real estate (69–88%). They also take most of it from food and drink, and from utilities (about 62–65%).
+- **Investment takes most of construction's gain** (`r pct(g('construction', 'dest_investment'))`). Cheaper building makes housing and infrastructure cheaper.
+- **The business-to-business groups spread their gains across all four buyers.** About 35–45% of their gain reaches exports.
+- **What this means for local and national strategy** (section 3 of the plan):
+    - a gain in a business-to-business sector is passed to buyers across the country, so a place that pays for it keeps only part (T9 will measure how much);
+    - a gain in everyday services lands on local households, so the place keeps it, unless rents absorb it (W6).
+
+## 5. What this changes in the plan
+
+- **W4 is reworded.** The Domar weight counts gross output however it is sold. Upstream position is kept as an axis, but for incidence and for local against national, not for the size of the national gain.
+- **T2's expectation was half right.** Construction, wholesale and business services carry large weights, but so do finance and the tradable professional services. The tradable/non-tradable line doesn't separate high and low leverage.
+- **The hypothesis survives T2, at first order and nationally.**
+    - Two-thirds of the market leverage is outside the exported products, with about the same share of jobs.
+    - A strategy that targets only tradables leaves most of the national first-order gain on the table, unless points of productivity are much cheaper to buy there. T10 asks how much cheaper.
+- **Round 1's point about sparsity recurs.** At the group level, real estate is as sparse as professional services (SK `r num(g('real_estate', 'SK'), 1)` against `r num(g('professional', 'SK'), 1)`) but exports `r pct(g('real_estate', 'export_share'))`. Sparsity picks up London's concentration, not tradability.
+
+## 6. Sector groups for Model F
+
+The groups follow the plan's three axes:
+
+- **tradability**, from the tables;
+- **upstream position**, from the tables;
+- **what limits productivity**, assigned by hand.
+
+The foundational type follows the typology in the `modelling_demand` notes, with business services split out. Two products are left out: imputed rent of owner-occupiers, and households as employers.
+
+```{r}
+#| label: tbl-groups
+#| tbl-cap: "Proposed sector groups. Leverage: net Domar weight, % of GDP. GVA per job: £ thousand, UK GVA over GB employees, so about 3% high everywhere, and high for groups with many self-employed. B2B: share of sales to other businesses. Exports: direct share of sales; embodied: share of a gain landing on exports. Upstream: Ghosh row sums (1 = all to final demand)."
+
+gr %>% arrange(desc(domar_net)) %>%
+  transmute(Group = group_name, `Foundational type` = foundational, `What limits productivity` = limit,
+            Leverage = num(100 * domar_net, 1), `Value added` = num(100 * va_share, 1),
+            Employees = pct(emp_share, 1), `GVA per job` = num(gva_per_job / 1000),
+            B2B = pct(b2b_share), Exports = pct(export_share), Embodied = pct(dest_exports),
+            Households = pct(household_share), Upstream = num(upstreamness, 2), SK = num(SK, 1)) %>%
+  kable(align = 'lllrrrrrrrrrr')
+```
+
+- **For Model F, the script also writes:**
+    - each group's inputs from every other group per £ of output, domestic and imported (`outputs/t2_group_coefficients.csv`);
+    - each group's cost shares: compensation, surplus, taxes;
+    - final demand by buyer (`outputs/t2_group_final_demand.csv`).
+- **These give $\gamma_{ks}$ and the labour and land shares directly.** Land isn't in the tables. Part of gross operating surplus will have to stand for it, as a choice to argue with.
+- **Loose fits to revisit:**
+    - Utilities are "catch-up" here, but they are regulated networks, where productivity is set by regulation and investment more than by firm practice.
+    - Professional services mix tradable frontier firms with local ones: accountants, solicitors, vets. A finer split would need the firm data (T11a).
+    - Agriculture is a squeezed supplier with a high export share for some products.
+
+## 7. Checks and caveats
+
+```{r}
+#| label: tbl-checks
+t2_checks %>% mutate(value = ifelse(abs(value) < 1e-6, format(value, digits = 2, scientific = TRUE), num(value))) %>%
+  rename(Check = check, Value = value) %>% kable(align = 'lr')
+```
+
+- **The tables add up.**
+    - The Leontief inverse computed here matches the ONS's own to rounding error.
+    - Output equals the Leontief inverse times final demand.
+    - Every product's gain shares sum to one.
+- **Employment.**
+    - BRES covers Great Britain and the tables the UK, so GVA per job is about 3% too high.
+    - BRES leaves out the self-employed and farm agriculture. That makes GVA per job high for construction, agriculture and personal services, and their shares of jobs low.
+    - Products share their SIC groups' employees in proportion to GVA, which assumes equal GVA per job within a group.
+- **Hulten's theorem is first order.**
+    - With large shocks, or with inputs that are hard to substitute, network position adds to the Domar weight (Baqaee and Farhi 2019).
+    - With markups, the right weights are cost-based rather than sales-based.
+    - Neither is likely to reverse the split between exported and other products, but Model F will show second-order effects directly.
+- **Imputed rent is left out.** It is 11% of GDP by Domar weight, with no employees, and it isn't a productivity target.
+
+```{r}
+#| label: t11a-section
+#| results: asis
+if (has_ch) {
+  cat(knitr::knit_child(file.path(doc_dir, '_tradeable_jobs_round2_t11a.qmd'), quiet = TRUE, envir = environment()))
+} else {
+  cat('## 8. What the firm data say (T11a)\n\nThe Companies House report outputs are not on this machine, so this section is empty in this build. ',
+      'See `code/tradeable_jobs/13_t11a_firm_aggregates.R`.\n')
+}
+```
+
+## 9. Tradability within the UK, from payments (T4)
+
+```{r}
+#| label: t4-setup
+source('code/tradeable_jobs/14_t4_payment_tradability.R')
+t4c <- function(pair) t4$correlations$r[t4$correlations$pair == pair]
+t4r <- function(y, regs, term) { x <- t4$regs %>% filter(outcome == y, regressors == regs, term == !!term); x }
+b2b_div <- t4$main %>% filter(b2b_share >= 0.3, is.finite(index))
+sup <- t4$suppression %>% filter(year == 2019)
+g8 <- t4$groups8
+```
+
+- **The question.** Can the ONS payment flows between industries and regions measure how tradable each industry is *within* the UK, without using geographic concentration (sparsity)? If so, it would test Rice and Venables's notion of tradability directly.
+- **The measure.**
+    - For each SIC division, it is the share of its business income paid by firms in other ITL1 regions, against the share it would get if buyers had no home bias.
+    - Intermediary payers are left out: card acquirers and banks, financial auxiliaries, platforms, booking and admin services.
+    - 1 means no home bias; 0 means all income comes from the seller's own region.
+- **The short answer is no, not yet.**
+    - The measure is stable internally. It correlates `r num(t4c('index, stripped against raw'), 2)` with the version that keeps intermediaries, `r num(t4c('index, with and without London'), 2)` with the version without London, and `r num(t4c('index, 2019 against 2024'), 2)` between 2019 and 2024.
+    - But it fails the one external check available.
+    - It also covers too little of business-to-business trade to be trusted as a measure of it.
+
+**Why it fails.**
+
+- **Coverage.**
+    - The published payments, without intermediaries, add up to £`r num(sum(t4$coverage$income_bn))`bn of business income in 2019, against £`r num(sum(t4$coverage$intermediate_bn))`bn of domestic intermediate sales in the input–output tables.
+    - The median division's payments cover `r pct(median(t4$coverage$coverage))` of its intermediate sales. Some divisions are near zero, and a few exceed 100%, because payments include flows that aren't sales.
+    - `r pct(sup$share_months_suppressed)` of monthly cells are suppressed.
+- **Geography.** Payments are placed at the registered entity. A national chain's head office paying a local contractor counts as trade between regions, so the measure overstates it for any sector selling to multi-site firms.
+- **Validation.** For Scottish sellers, the payment-based share of business income from the rest of the UK is unrelated to the rest-of-UK sales share in Scotland's input–output tables (r = `r num(t4c('Scotland: payments RUK share against IO RUK share'), 2)`, Spearman `r num(t4c('Scotland: same, Spearman'), 2)`, `r t4$correlations$n[t4$correlations$pair == 'Scotland: same, Spearman']` divisions).
+
+**What it does say, with those caveats.**
+
+- **Sparsity isn't this kind of tradability either.**
+    - The payment index is unrelated to round 1's sector sparsity: r = `r num(t4c('index with SK (all divisions)'), 2)` across all divisions, and `r num(t4c('index with SK (B2B share 30%+)'), 2)` across the `r nrow(b2b_div)` that sell at least 30% to other businesses.
+    - It is only weakly related to the international export share (`r num(t4c('index with export share (B2B 30%+)'), 2)`).
+- **In round 1's regression it adds nothing.**
+    - An area's "business-to-business tradability bias" explains some of earnings on its own: R² `r num(t4r('w_i', 'TB_b2b', 'TB_b2b')$adj_r2, 2)`, against `r num(t4r('w_i', 'SB', 'SB')$adj_r2, 2)` for sparsity bias.
+    - But beside sparsity bias its coefficient is `r num(t4r('w_i', 'SB + TB_b2b', 'TB_b2b')$coef, 1)` (t = `r num(t4r('w_i', 'SB + TB_b2b', 'TB_b2b')$t, 2)`).
+- **The official interregional trade estimates** (ONS, 2019, official statistics in development) give trade between regions for eight broad industry groups.
+
+```{r}
+#| label: tbl-irt
+#| tbl-cap: "Trade between UK regions as a share of output, 2019, eight industry groups: ONS interregional trade estimates (exports summed over all pairs of ITL1 regions) over output in the 2019 input–output tables. Wholesale and retail trade is valued at sales but their output is the margin, so their shares aren't comparable. Sparsity: round 1's SK, employment-weighted. Payment index: this section's measure, income-weighted."
+g8 %>% arrange(desc(interregional_share)) %>%
+  transmute(`Industry group` = industry_group, `SIC` = sections, `Trade between regions / output` = num(interregional_share, 2),
+            `International exports / output` = num(international_share, 2), `Sparsity (SK)` = num(SK, 1),
+            `Payment index` = num(index, 2)) %>% kable(align = 'llrrrr')
+```
+
+- **Among the six comparable groups, trade between regions is unrelated to sparsity** (r = `r num(t4c('6 groups: interregional share with SK'), 2)`, Spearman `r num(t4c('6 groups: Spearman, interregional share with SK'), 2)`).
+    - Real estate and professional services are the sparsest group, but trade the smallest share of their output between regions.
+    - Construction, energy and the other non-manufacturing production industries trade nearly as much of their output between regions as manufacturing (`r num(g8$interregional_share[g8$industry_group == 'Non-manufacturing production'], 2)` against `r num(g8$interregional_share[g8$industry_group == 'Manufacturing'], 2)`).
+    - Six points prove little. But they point the same way as everything else in round 1 and T4: sparsity picks up concentration (largely London's), not tradability, whether international or within the UK.
+- **A caution on the official estimates.** Their services figures are themselves built partly from the same payments data, so they aren't fully independent of the payment index.
+- **The open item from round 1, "trade between GB places by sector", stays open.** The interregional estimates are the best source, but at eight groups they are too coarse for sector-level tests. Finer estimates by industry would be the thing to ask ONS for.
+
+## 10. The whole chain behind each product (T3)
+
+```{r}
+#| label: t3-setup
+source('code/tradeable_jobs/15_t3_chain_labour.R')
+t3g <- t3$groups %>% filter(group != 'excluded')
+t3x <- t3$by_group %>% filter(group != 'excluded')
+tg <- function(id, col) t3g[[col]][t3g$group == id]
+xg <- function(id) t3x$exports_share[t3x$group == id]
+```
+
+- **The question.** How much of the labour behind "tradable" final products sits in other sectors upstream?
+- **The method.** The jobs embodied in £1m of final demand for a product are its own jobs plus those in every UK supplier, directly or down the chain: $\lambda' = l'(I - A)^{-1}$, with $l$ = BRES employees per £m of output. Value added is embodied the same way.
+- **The answer: a large share, as the plan expected.**
+    - About half the jobs behind manufactured final products are in other groups: `r pct(tg('machinery_vehicles', 'share_jobs_outside_group'))` for electronics, machinery and vehicles, `r pct(tg('food_drink', 'share_jobs_outside_group'))` for food and drink, and `r pct(tg('chem_pharma', 'share_jobs_outside_group'))` for chemicals and pharmaceuticals.
+    - Across all products that export a quarter or more of their output, `r pct(1 - t3$trad_in_own_products)` of the jobs behind their final sales are in other, less exported products.
+
+```{r}
+#| label: fig-chain
+#| fig-height: 6
+#| fig-cap: "GVA per job in each group's own firms (BRES employees) against GVA per job along the whole UK chain behind its final products (lens 3 of the flow model): embodied value added over embodied jobs, weighted by final demand."
+d <- t3g %>% mutate(group_name = fct_reorder(group_name, own_gva_per_job)) %>%
+  select(group_name, `Own firms` = own_gva_per_job, `Whole UK chain` = chain_gva_per_job) %>%
+  pivot_longer(-group_name)
+ggplot(d, aes(value, group_name)) +
+  geom_line(aes(group = group_name), colour = grid_col, linewidth = 1.2) +
+  geom_point(aes(fill = name), shape = 21, colour = surface, stroke = 0.6, size = 3) +
+  scale_fill_manual(values = cat_cols[1:2], name = NULL) +
+  scale_x_log10(labels = function(v) paste0('£', v / 1000, 'k'), breaks = c(30, 50, 100, 200, 400) * 1000) +
+  labs(x = 'GVA per job (log scale)', y = NULL) + theme_note()
+```
+
+- **The chain lens narrows the gaps between sectors.**
+    - The high-productivity tradable groups look less exceptional once their suppliers are counted. Chemicals and pharmaceuticals fall from £`r num(tg('chem_pharma', 'own_gva_per_job') / 1000)`k to £`r num(tg('chem_pharma', 'chain_gva_per_job') / 1000)`k per job, and electronics, machinery and vehicles from £`r num(tg('machinery_vehicles', 'own_gva_per_job') / 1000)`k to £`r num(tg('machinery_vehicles', 'chain_gva_per_job') / 1000)`k.
+    - The low-productivity service groups look better, because their final products carry business-service and wholesale inputs. Administrative and support services rise from £`r num(tg('admin_support', 'own_gva_per_job') / 1000)`k to £`r num(tg('admin_support', 'chain_gva_per_job') / 1000)`k, and retail from £`r num(tg('retail', 'own_gva_per_job') / 1000)`k to £`r num(tg('retail', 'chain_gva_per_job') / 1000)`k.
+    - Part of what makes a tradable sector's own GVA per job high is that it buys its labour-intensive work from other sectors.
+- **The jobs embodied in UK exports are mostly in services.**
+    - Professional services hold `r pct(xg('professional'))` of them, administrative and support `r pct(xg('admin_support'))`, wholesale `r pct(xg('wholesale_motor'))`, transport `r pct(xg('transport'))` and finance `r pct(xg('finance'))`.
+    - Electronics, machinery and vehicles hold `r pct(xg('machinery_vehicles'))`.
+- **What this means for the hypothesis.**
+    - "Tradable productivity" partly *is* productivity in non-tradable inputs. A gain in logistics, wholesale or business services lowers the cost of exports (T2, section 4), and those sectors already hold much of the employment that exports support.
+    - So the tradable/non-tradable split is a poor guide to which jobs depend on exporting.
+- **Caveats.**
+    - These are national, domestic chains only: imported inputs' labour is abroad and not counted.
+    - Employment is BRES employees, without the self-employed.
+    - The regional version is not done: it needs regional coefficients, and T4 showed the payment flows cover too little of business-to-business trade to give them.
+
+## 11. Supply chains in the Rice and Venables model (Model F: T1, T7, T8, T9)
+
+```{r}
+#| label: mf-setup
+source('code/tradeable_jobs/16_modelF.R')
+source('code/tradeable_jobs/16b_modelF_closure.R')
+e1 <- mf_e1 %>% left_join(mf$sectors %>% select(group, group_name, t_s, limit), by = 'group')
+e1m <- e1 %>% filter(mobility == 'frechet')
+e1g <- function(id, col, chains = TRUE) e1m[[col]][e1m$group == id & e1m$supply_chains == chains]
+e2 <- mf_e2 %>% filter(supply_chains) %>% left_join(mf$sectors %>% select(group, group_name, t_s, limit), by = 'group')
+e2g <- function(id, mob, col) e2[[col]][e2$group == id & e2$mobility == mob]
+lens <- mf_lens
+rat <- e1m %>% filter(supply_chains) %>% mutate(r = d_welfare / hulten)
+cl <- mf_closure %>% mutate(r = d_welfare / hulten)
+local_ids <- c('retail', 'hospitality', 'arts_personal')
+```
+
+**What Model F is.**
+
+- **The engine.** It is round 1's Rice and Venables engine, extended so that every sector buys inputs from every other.
+    - A sector's unit cost includes the local price of each input, which carries the same trade costs as consumer goods.
+    - Each place's spending on a sector is households' demand plus other sectors' purchases.
+- **Calibration.** It is calibrated on T2's tables:
+    - 18 market sector groups;
+    - the domestic input coefficients and labour shares;
+    - consumption shares from domestic final demand;
+    - trade costs by market reach;
+    - foreign demand by sector, scaled so each sector's share of exports matches the tables.
+- **What is held out.**
+    - The providential group is held fixed.
+    - Real estate becomes the model's land. All non-labour value added is treated as a local fixed factor ("land and buildings") owned by residents, as in Rice and Venables, whose only factors are labour and land.
+    - Imports and taxes are inputs at fixed prices.
+- **Places and productivity.** There are 12 places, with place-by-sector productivity drawn as Rice and Venables do (standard deviation 0.2). Every experiment is run on three draws.
+- **Benchmarks.** The broad one has people moving between places (Fréchet). The narrow one has people staying in their place and choosing a sector within it.
+- **Checks.**
+    - With no intermediates it reproduces round 1's engine exactly.
+    - With one closed place, the gain from 1% productivity in each sector equals its Domar weight (Hulten), to `r format(mf$checks$value[2], digits = 2)`.
+    - Its sector sizes correlate `r num(mf$checks$value[4], 3)` with the tables.
+    - All `r nrow(mf_runs)` experiment runs converged.
+
+**A choice that matters: how trade balances.**
+
+- **In Rice and Venables's closure,** the import price is fixed and a foreign-demand shifter balances trade at every step. A productivity gain in an export sector is then absorbed by weaker foreign demand for all UK exports, so little of it reaches UK residents as cheaper imports.
+- **Model F instead holds foreign demand fixed** and lets the UK's wage and price level against world prices adjust. That is the standard small-open-economy reading.
+- **The two closures give opposite rankings.**
+    - With foreign demand fixed, the gain from 5% productivity in a group is `r num(min(rat$r[!rat$group %in% 'mining']), 2)`–`r num(max(rat$r[!rat$group %in% 'mining']), 2)` times its Domar (Hulten) prediction. It is below 1 for local services and construction and above 1 for most other groups, highest for the export-heavy ones (mining is an outlier, at `r num(rat$r[rat$group == 'mining'], 1)`).
+    - In Rice and Venables's closure it is `r num(cl$r[cl$group == 'machinery_vehicles' & grepl('Rice', cl$closure)], 2)` for electronics, machinery and vehicles and `r num(cl$r[cl$group == 'retail' & grepl('Rice', cl$closure)], 2)` for retail.
+- **Results below use Model F's closure; T10 (section 14) shows both.** This is the single biggest modelling choice in the comparison of tradables with the rest. Round 1's headline results compared places within one equilibrium, so they don't depend on it.
+
+**The national gain from productivity in each group.**
+
+```{r}
+#| label: fig-mf-national
+#| fig-height: 6
+#| fig-cap: "Model F, people mobile: national real income gain (welfare) from 5% productivity in each group in every place, with supply chains and without them (domestic inputs replaced by fixed-price ones, same cost shares), against the Domar (Hulten) prediction with supply chains. Means of three draws."
+d <- e1m %>% select(group_name, supply_chains, d_welfare, hulten) %>%
+  pivot_wider(names_from = supply_chains, values_from = c(d_welfare, hulten)) %>%
+  transmute(group_name, `Real gain, with supply chains` = d_welfare_TRUE, `Real gain, no supply chains` = d_welfare_FALSE,
+            `Hulten prediction` = hulten_TRUE) %>%
+  mutate(group_name = fct_reorder(group_name, `Real gain, with supply chains`)) %>% pivot_longer(-group_name) %>%
+  mutate(name = factor(name, levels = c('Real gain, with supply chains', 'Real gain, no supply chains', 'Hulten prediction')))
+ggplot(d, aes(value, group_name)) +
+  geom_line(aes(group = group_name), colour = grid_col, linewidth = 1.2) +
+  geom_point(aes(fill = name), shape = 21, colour = surface, stroke = 0.6, size = 3) +
+  scale_fill_manual(values = cat_cols[1:3], name = NULL) +
+  scale_x_continuous(labels = function(v) paste0(v * 100, '%')) + labs(x = NULL, y = NULL) + theme_note() +
+  guides(fill = guide_legend(nrow = 1))
+```
+
+- **Nationally, the biggest gains from an equal percentage are in big groups on both sides of the tradable line:** finance (`r pct(e1g('finance', 'd_welfare'), 2)`), professional services (`r pct(e1g('professional', 'd_welfare'), 2)`), construction (`r pct(e1g('construction', 'd_welfare'), 2)`), wholesale (`r pct(e1g('wholesale_motor', 'd_welfare'), 2)`), and electronics, machinery and vehicles (`r pct(e1g('machinery_vehicles', 'd_welfare'), 2)`). This is T2's Domar ranking, with terms of trade on top.
+- **Supply chains raise the gain from the upstream groups.** When the domestic links are switched off:
+    - construction's gain falls from `r pct(e1g('construction', 'd_welfare'), 2)` to `r pct(e1g('construction', 'd_welfare', FALSE), 2)`;
+    - utilities' from `r pct(e1g('utilities', 'd_welfare'), 2)` to `r pct(e1g('utilities', 'd_welfare', FALSE), 2)`;
+    - transport's from `r pct(e1g('transport', 'd_welfare'), 2)` to `r pct(e1g('transport', 'd_welfare', FALSE), 2)`.
+
+    That is the supply-chain channel the hypothesis relies on, and it is real. But it is in the Domar weight already: it doesn't add beyond it.
+- **The benchmark barely matters nationally.** Gains with people immobile correlate `r num(with(e1 %>% filter(supply_chains), cor(d_welfare[mobility == 'frechet'], d_welfare[mobility == 'immobile'])), 3)` with gains with people mobile.
+
+**The official lens and the real one (T8).**
+
+- **Nationally they agree in sign in every experiment, but not in size.** For local services, measured GVA per worker rises much less than real income:
+    - retail `r pct(e1g('retail', 'd_gva_pw'), 2)` against `r pct(e1g('retail', 'd_welfare'), 2)`;
+    - hospitality `r pct(e1g('hospitality', 'd_gva_pw'), 2)` against `r pct(e1g('hospitality', 'd_welfare'), 2)`;
+    - construction `r pct(e1g('construction', 'd_gva_pw'), 2)` against `r pct(e1g('construction', 'd_welfare'), 2)`.
+
+    For finance it rises more (`r pct(e1g('finance', 'd_gva_pw'), 2)` against `r pct(e1g('finance', 'd_welfare'), 2)`).
+- **Locally they often disagree in sign.**
+    - When the lagging place improves one group, with people mobile, measured GVA per worker and real income move in opposite directions in `r sum(lens$disagree[lens$experiment == 'E2 local' & lens$mobility == 'frechet'])` of 18 groups. With people immobile it's `r sum(lens$disagree[lens$experiment == 'E2 local' & lens$mobility == 'immobile'])` of 18.
+    - Improving local services there raises real income per resident but lowers measured GVA per worker. The plan expected exactly this, and it's probably the most useful single warning for policy: a place that makes its everyday services more productive will look worse on the official lens.
+
+**Local against national: the lagging place (T9, model half).**
+
+```{r}
+#| label: fig-mf-local
+#| fig-height: 6
+#| fig-cap: "Model F: the share of the national real gain that stays in the lagging place when it raises productivity by 5% in one group, with people mobile between places and immobile. Means of three draws (the lagging place is the one with the lowest real income at the start)."
+d <- e2 %>% select(group_name, mobility, lag_gain_share) %>%
+  mutate(mobility = recode(mobility, frechet = 'People mobile', immobile = 'People immobile'),
+         group_name = fct_reorder(group_name, lag_gain_share, .fun = max))
+ggplot(d, aes(lag_gain_share, group_name)) +
+  geom_vline(xintercept = 0, colour = muted, linewidth = 0.4) +
+  geom_line(aes(group = group_name), colour = grid_col, linewidth = 1.2) +
+  geom_point(aes(fill = mobility), shape = 21, colour = surface, stroke = 0.6, size = 3) +
+  scale_fill_manual(values = cat_cols[c(1, 2)], name = NULL) +
+  scale_x_continuous(labels = scales::percent, expand = expansion(mult = c(0.02, 0.05))) +
+  labs(x = 'Share of the national gain kept by the lagging place', y = NULL) + theme_note()
+```
+
+- **With people mobile, the lagging place keeps little of any gain.** It keeps between `r pct(min(e2$lag_gain_share[e2$mobility == 'frechet']))` and `r pct(max(e2$lag_gain_share[e2$mobility == 'frechet']))` of the national gain, whichever group it improves.
+    - People move in and rents rise, so the gain spreads across the country through migration and prices.
+    - Local and national strategy then diverge for every group, as section 3 of the plan predicted for mobile people (W6).
+- **With people immobile, the ranking reverses from the national one.**
+    - The place keeps `r pct(min(e2$lag_gain_share[e2$mobility == 'immobile' & e2$group %in% local_ids]))`–`r pct(max(e2$lag_gain_share[e2$mobility == 'immobile' & e2$group %in% local_ids]))` of the gain from local services.
+    - It keeps half to two-thirds from construction, transport and food (`r pct(e2g('construction', 'immobile', 'lag_gain_share'))`, `r pct(e2g('transport', 'immobile', 'lag_gain_share'))`, `r pct(e2g('food_drink', 'immobile', 'lag_gain_share'))`).
+    - It keeps only `r pct(e2g('finance', 'immobile', 'lag_gain_share'))` from finance and `r pct(e2g('chem_pharma', 'immobile', 'lag_gain_share'))` from chemicals, whose gains pass to buyers everywhere through prices.
+    - So local and national align for local services only when people stay put. Then the local strategy that keeps most of the gain is the one with the smallest national gain.
+- **C9 survives supply chains.** A local-services gain in the lagging place lowers its nominal wage, with people mobile: retail `r pct(e2g('retail', 'frechet', 'lag_d_wage'), 2)`, personal services `r pct(e2g('arts_personal', 'frechet', 'lag_d_wage'), 2)`. Its real income still rises.
+- **The "missing lever" (C8, T7) doesn't work in Model F.**
+    - Improving local inputs (construction, transport, utilities) in the lagging place doesn't make its tradables cheaper to produce: their unit costs rise slightly, by `r pct(e2g('construction', 'frechet', 'lag_d_tradable_cost'), 2)`–`r pct(e2g('utilities', 'frechet', 'lag_d_tradable_cost'), 2)` with people mobile.
+    - Higher local wages and rents outweigh the cheaper inputs.
+    - Cheaper local inputs are not, on their own, the lever Venables says lagging places lack.
+- **Land.** About half to two-thirds of the national income gain goes to the local fixed factor: `r pct(median(e1m$land_share[e1m$supply_chains]))` for the median group, and `r pct(quantile(e1m$land_share[e1m$supply_chains], 0.25))`–`r pct(quantile(e1m$land_share[e1m$supply_chains], 0.75))` for the middle half of groups.
+    - That factor stands for all non-labour income here, not just land, so this is the non-labour share of the gain.
+    - It doesn't differ much between tradable and non-tradable groups.
+**Supply chains in Venables's city model (T7, Model A).**
+
+```{r}
+#| label: ma-setup
+source('code/tradeable_jobs/25_modelA_supply_chains.R')
+mag <- function(g, q, col) ma[[col]][abs(ma$gamma - g) < 1e-9 & abs(ma$qN - q) < 1e-9]
+```
+
+- **The change.** Tradable cities now buy γ units of the non-tradable per unit of output, from its national market. Their wage is what is left of the world price after paying for those inputs.
+- **Supply chains shift the equilibrium range towards fewer tradable cities, and narrow it.** As γ rises from 0 to 0.3:
+    - the lock-in edge E (the fewest tradable cities an equilibrium can have) falls from `r pct(mag(0, 1, 'E'), 1)` to `r pct(mag(0.3, 1, 'E'), 1)` of cities;
+    - X falls from `r pct(mag(0, 1, 'X'), 1)` to `r pct(mag(0.3, 1, 'X'), 1)`.
+
+    Tradables' own purchases need more non-tradable cities.
+- **Better non-tradable inputs are no escape from lock-in.**
+    - With γ = 0.2, raising non-tradable productivity 10% moves E from `r pct(mag(0.2, 1, 'E'), 1)` to `r pct(mag(0.2, 1.1, 'E'), 1)` and X from `r pct(mag(0.2, 1, 'X'), 1)` to `r pct(mag(0.2, 1.1, 'X'), 1)`.
+    - The range widens at both ends, so an economy can stay stuck with even fewer tradable cities than before.
+    - Real income per worker still rises everywhere, by `r pct(mag(0.2, 1.1, 'U_mid') / mag(0.2, 1, 'U_mid') - 1, 1)`.
+    - This is the same answer Model F gives to C8: cheaper non-tradable inputs raise living standards but don't pull lagging places into tradables.
+- **Round 1's Model A results are unchanged** with the new code (E = 28.9% and X = 50% without supply chains).
+
+<!-- MODEL F SECTIONS END -->
+
+## 12. Do productivity gains cost the improving sector jobs? (T6)
+
+```{r}
+#| label: t6-setup
+source('code/tradeable_jobs/17_t6_own_jobs.R')
+t6r <- function(sample, term) t6$regs %>% filter(sample == !!sample, term == !!term)
+st <- 'Stacked 5-year differences, slope by reach'
+mfj <- mf_e1 %>% filter(supply_chains, mobility == 'frechet') %>% left_join(mf$sectors %>% select(group, t_s), by = 'group')
+jt <- function(ts) mean(mfj$d_group_jobs[mfj$t_s == ts]) / log(1 + mf_shock)
+```
+
+- **The question.** If productivity rises in a sector, does it lose jobs? If people can't move, the workers displaced from local services are exactly those the hypothesis is meant to help.
+- **In UK data, yes, outside tradables.**
+    - Across about 60 industries (ONS labour productivity by industry division, 1997–2019), hours grew more slowly where output per hour grew faster.
+    - In stacked five-year differences, each log point of productivity growth comes with `r num(t6r('Stacked 5-year differences, market industries', 'd_oph')$estimate, 2)` log points of hours (standard error `r num(t6r('Stacked 5-year differences, market industries', 'd_oph')$se, 2)`).
+    - By market reach (T2's rules): business-to-business industries `r num(t6r(st, 'reachbusiness to business:d_oph')$estimate, 2)` (`r num(t6r(st, 'reachbusiness to business:d_oph')$se, 2)`), local services `r num(t6r(st, 'reachlocal services:d_oph')$estimate, 2)` (`r num(t6r(st, 'reachlocal services:d_oph')$se, 2)`), tradables `r num(t6r(st, 'reachtradable:d_oph')$estimate, 2)` (`r num(t6r(st, 'reachtradable:d_oph')$se, 2)`).
+    - The 1997–2019 long difference points the same way, with wider errors.
+- **Model F gets the ranking right but not the sign.** Per log point of productivity, a group's own jobs change by `r num(jt(1.3), 1)` in the tradable groups, `r num(jt(1.5), 1)` in the business-to-business groups and `r num(jt(2.0), 1)` in local services.
+    - Demand for tradables is elastic, so cheaper output sells much more, as in the data.
+    - But in the model no group loses jobs. Its consumer demand is Cobb–Douglas, so spending on a local service stays the same when its price falls, and its jobs stay level or rise a little (through exports, for hospitality).
+    - The data say demand for local and business-to-business services is less elastic than that.
+    - So Model F understates the jobs displaced by productivity in those sectors. A version with less elastic consumer demand is the obvious next step.
+- **What it means.**
+    - Productivity gains in local and business-to-business services arrive as cheaper goods and services plus fewer hours in the improving sector.
+    - The hours are released for other work. That is the gain when people can move, and a cost to the workers concerned when they can't.
+    - Section 3 of the plan said this was the honest trade-off to show. It is real in the data.
+- **Caveats.**
+    - Output per hour and hours share the same hours data, so measurement error in hours biases the slope towards −1 (division bias).
+    - Industries are broad.
+
+## 13. Do foundational sectors buy locally? (T5, limited)
+
+```{r}
+#| label: t5-setup
+source('code/tradeable_jobs/18_t5_local_sourcing.R')
+t5t <- function(cls, col = 'index') t5$by_type[[col]][t5$by_type$class == cls]
+t5g <- function(id, col = 'index') t5$by_group[[col]][t5$by_group$group == id]
+```
+
+- **The question.** Community wealth building assumes that spending put into local foundational sectors goes round the local economy more than spending put into tradables. Do those sectors buy more from their own region?
+- **What was done.**
+    - The plan's version builds regional input–output matrices from the payment flows and computes local multipliers. T4 showed the payments cover too little of business-to-business trade for that.
+    - So this keeps to one ratio for each buying industry: the share of its business spending paid to suppliers in its own ITL1 region, against the share with no home bias.
+    - Own-region shares are the trustworthy half of the payment data, because when both sides are local, intermediaries can't distort the geography.
+    - Households aren't in the data, so this is the first round of business-to-business spending only.
+- **Everyday services don't buy more locally than tradables.**
+    - Weighted by spending, the home-bias index is `r num(t5t('Everyday services'), 2)` for everyday services, `r num(t5t('Tradable or basic'), 2)` for tradable and basic sectors, and `r num(t5t('Material foundational'), 2)` for the material foundational sectors.
+    - 1 would mean no home bias.
+    - Retail keeps `r pct(t5g('retail', 'own_share'))` of its business spending in its own region (index `r num(t5g('retail'), 2)`), hospitality `r pct(t5g('hospitality', 'own_share'))` (index `r num(t5g('hospitality'), 2)`).
+- **The local buyers are the material and production sectors.**
+    - The highest indices are agriculture (`r num(t5g('agri_fish'), 1)`), ordinary manufacturing (metal products `r num(t5g('metals_minerals'), 1)`, light manufacturing `r num(t5g('light_mfg'), 1)`), construction (`r num(t5g('construction'), 1)`) and transport (`r num(t5g('transport'), 1)`).
+    - Finance and information and communication buy least locally.
+- **Without London** as buyer or supplier, every index rises, because London's head offices buy for the whole country. But the ranking holds: everyday services `r num(t5t('Everyday services', 'index_noLondon'), 2)`, tradable and basic `r num(t5t('Tradable or basic', 'index_noLondon'), 2)`, material foundational `r num(t5t('Material foundational', 'index_noLondon'), 2)`.
+- **What this means.**
+    - It matches the earlier Yorkshire finding, now across all regions: local services employ locally but buy nationally.
+    - The demand-side case for the foundational economy, that its spending recirculates locally, is weak for everyday services and stronger for construction, transport and local production.
+    - The supply-side case, through prices and costs, doesn't rest on this. It stands or falls on Model F (section 11).
+- **Caveats.** Payments are placed at the registered entity: a chain's head office buying for its branches counts as buying from wherever the head office is. Coverage is partial and uneven (T4).
+
+## 14. Break-even: how cheap must broad catch-up be? (T10)
+
+```{r}
+#| label: t10-setup
+source('code/tradeable_jobs/19_t10_breakeven.R')
+nb <- t10$national %>% filter(!is.na(points))
+nbg <- function(px, mob, col = 'breakeven_mean') nb[[col]][grepl(px, nb$experiment) & nb$mobility == mob]
+cp <- mf_closure_proxies
+cpg <- function(px, closure, mob = 'frechet') cp$breakeven_vs_P1[grepl(px, cp$proxy) & grepl(closure, cp$closure) & cp$mobility == mob]
+lt <- t10$local_by_type
+ltg <- function(cls, mob, col = 'breakeven_local') lt[[col]][lt$limit == cls & lt$mobility == mob]
+```
+
+- **The question.** Evidence on the cost of a point of productivity is too thin to assume a cost (plan section 7). So T10 asks: how much more could a point cost in the long tail, the business-to-business groups or local services before a frontier push in tradables does better?
+- **What a "point" is.** The employment-weighted average log rise in productivity a policy delivers, so it scales with the number of workers reached.
+- **The break-even ratio.** The real gain per point under a policy, divided by the gain per point under the frontier push (P1: +10% in the two strongest places of each frontier group).
+    - A policy beats P1 if a point costs less than that multiple of a P1 point.
+    - A ratio of 0.7 means it wins if its points are at least 30% cheaper. A ratio of 1.2 means it wins even if they are 20% dearer.
+
+```{r}
+#| label: tbl-t10
+#| tbl-cap: "Break-even cost ratios against the frontier push (P1), national real income per point. Model F's closure: means (range) over three draws. Rice and Venables's closure: one draw."
+nb %>% filter(!grepl('^P1', experiment)) %>%
+  transmute(Proxy = sub(' .*', '', experiment), mobility,
+            `Model F closure` = paste0(num(breakeven_mean, 2), ' (', num(breakeven_min, 2), '–', num(breakeven_max, 2), ')')) %>%
+  left_join(cp %>% filter(grepl('Rice', closure), proxy != 'P1 frontier push') %>%
+              transmute(Proxy = sub(' .*', '', proxy), mobility, `Rice and Venables closure` = num(breakeven_vs_P1, 2)),
+            by = c('Proxy', 'mobility')) %>%
+  mutate(Proxy = recode(Proxy, P2 = 'P2 long tail', P3 = 'P3 upstream (business-to-business)', P4 = 'P4 local services'),
+         mobility = recode(mobility, frechet = 'mobile', immobile = 'immobile')) %>%
+  rename(People = mobility) %>% kable(align = 'llrr')
+```
+
+- **Nationally, per point, the ranking depends on the closure (section 11).**
+    - With Model F's closure, the frontier push gives the most per point. The long tail needs points about `r pct(1 - nbg('P2', 'frechet'))` cheaper to match it (ratio `r num(nbg('P2', 'frechet'), 2)`), upstream about `r pct(1 - nbg('P3', 'frechet'))` cheaper (`r num(nbg('P3', 'frechet'), 2)`), and local services about `r pct(1 - nbg('P4', 'frechet'))` cheaper (`r num(nbg('P4', 'frechet'), 2)`).
+    - With Rice and Venables's closure, all three beat the frontier push at equal cost per point: long tail `r num(cpg('P2', 'Rice'), 2)`, upstream `r num(cpg('P3', 'Rice'), 2)`, local services `r num(cpg('P4', 'Rice'), 2)`.
+    - The frontier push's advantage depends on export gains turning into cheaper imports. Without that, it has none.
+- **Locally, for the lagging place, per point delivered there:**
+    - With people immobile, catch-up groups give `r num(ltg('Catch-up', 'immobile'), 2)` times the frontier groups' own-place gain per point, and local services `r num(ltg('Limited by local demand', 'immobile'), 2)` times. A place whose people stay should prefer them even at 35–45% higher cost per point.
+    - With people mobile, the ratios are `r num(ltg('Catch-up', 'frechet'), 2)` and `r num(ltg('Limited by local demand', 'frechet'), 2)`, but the place keeps little of any gain (section 11).
+- **Against the room available (T11a).** In the firm data, the long tail has several times the room of the frontier: closing half the gap to the median is worth about as much as a 46% rise in the top decile.
+    - So even where the tail is worse per point, it has many more points available.
+    - The question is whether they can be bought.
+- **Against the evaluation evidence (plan section 7).** Neither side has a credible cost per point.
+    - Frontier subsidies (Regional Selective Assistance) bought jobs, not productivity.
+    - Spillovers from inward investment are small per pound.
+    - UK programmes for small firms show no measurable productivity effect within two to four years. Intensive consulting gave double-digit gains in large plants, at a high cost per firm.
+    - **What would need to be true for the tail to win nationally** under Model F's closure: points bought for small and mid-sized firms at about two-thirds of the cost of frontier points or less. Under Rice and Venables's closure, at any cost up to parity.
+    - **For an immobile lagging place,** catch-up wins unless its points cost more than about a third more than frontier ones.
+- **Caveats.**
+    - First-order gains on an equal-percentage basis, with three draws and 12 abstract places.
+    - Land and buildings as one fixed factor.
+    - Cobb–Douglas consumer demand, which understates the jobs that productivity displaces in local services (T6). Section 16 recalibrates demand to T6, and the ratios narrow.
+    - Equal cost per point "per worker" is the comparison, not equal cost per firm.
+
+## 15. Does Model F look like UK firms? (T11b)
+
+```{r}
+#| label: t11b-setup
+source('code/tradeable_jobs/20_t11b_moments.R')
+mm <- function(mob, col) t11b[[col]][t11b$mobility == mob]
+```
+
+- **The check.** Model F's physical productivity draws can't be observed. What the data measure is revenue productivity, GVA per worker. So the check compares the model's spread of log GVA per worker, split into sector, place and place-by-sector parts, with the same split for UK firms (T11a, section 8).
+- **They match.**
+    - Model F's place-by-sector spread is `r num(mm('frechet', 'sd_place_by_sector'), 3)` log points. `r if (!is.null(t11b_firms)) paste0("The firm data's region-by-group spread is ", num(t11b_firms$sd[t11b_firms$term == 'g_itl2'], 3), '.') else "(The firm data's tables are not on this machine.)"`
+    - Its sector spread is `r num(mm('frechet', 'sd_sector'), 2)`. `r if (!is.null(t11b_firms)) paste0("The firms' industry spread is ", num(t11b_firms$sd[t11b_firms$term == 'sic2'], 2), '.') else ''`
+    - Its place spread is `r num(mm('frechet', 'sd_place'), 3)` with people mobile and `r num(mm('immobile', 'sd_place'), 3)` with people immobile. `r if (!is.null(t11b_firms)) paste0("The firms' regional spread is ", num(t11b_firms$sd[t11b_firms$term == 'itl2'], 3), '.') else ''`
+- **What it means.**
+    - Rice and Venables's physical spread of 0.2 (`r num(mm('frechet', 'sd_physical_rest'), 2)` once place and sector effects are taken out) shows up as only about a third as much in revenue productivity. Prices and wages absorb the rest.
+    - The physical and revenue measures still correlate `r num(mm('frechet', 'cor_revenue_physical'), 2)`.
+    - The UK's small regional differences in GVA per worker within sectors are what the model predicts with Ricardian differences of the size Rice and Venables assume. They don't mean the physical differences are small.
+    - The mobile benchmark fits the regional spread better than the immobile one.
+- **Not checked.** The within/between/entry/exit decomposition needs firms, which Model F doesn't have.
+
+## 16. Model F with demand calibrated to T6
+
+```{r}
+#| label: md-setup
+source('code/tradeable_jobs/21_modelF_demand.R')
+mb <- md_best
+mg <- md_grid %>% semi_join(mb, by = c('eps_c', 'eps_i', 'sigma_x')) %>% left_join(md_targets, by = 'reach')
+mgr <- function(r, col) mg[[col]][mg$reach == r]
+e1c <- md_e1 %>% filter(demand == 'Calibrated to T6', mobility == 'frechet') %>% mutate(r = d_welfare / hulten)
+e1c_g <- function(id, col) e1c[[col]][e1c$group == id]
+be <- md_breakeven %>% filter(!is.na(points))
+beg <- function(px, dem, cl, mob = 'frechet') be$breakeven[grepl(px, be$experiment) & grepl(dem, be$demand) & grepl(cl, be$closure) & be$mobility == mob]
+e2c <- md_e2 %>% filter(demand == 'Calibrated to T6')
+e2c_g <- function(id, mob, col) e2c[[col]][e2c$group == id & e2c$mobility == mob]
+```
+
+- **Why.** T6 showed Model F's default demand is too generous.
+    - It uses Cobb–Douglas spending across sectors, Cobb–Douglas inputs, and foreign demand as elastic as demand between places (10).
+    - With it, no group loses jobs from its own productivity, while UK industries do.
+- **What changed.**
+    - Households' substitution between sectors and firms' substitution between inputs became CES.
+    - Foreign demand for UK exports got its own price elasticity.
+    - A grid search chose the setting whose own-jobs responses best match T6, weighting by its standard errors.
+- **The best fit:**
+    - households' elasticity `r num(mb$eps_c, 1)`;
+    - firms' elasticity between inputs `r num(mb$eps_i, 1)`;
+    - foreign demand elasticity `r num(mb$sigma_x, 0)`.
+
+```{r}
+#| label: tbl-md-fit
+#| tbl-cap: "Own-jobs response to own productivity (log points of jobs per log point of productivity), by market reach: T6's estimates from UK industries (stacked five-year differences, standard errors in brackets) against Model F with the calibrated demand and with the default."
+def <- md_grid %>% filter(eps_c == 1, eps_i == 1, sigma_x == 10)
+mg %>% left_join(def %>% select(reach, default = model), by = 'reach') %>%
+  transmute(`Market reach` = reach, `UK industries (T6)` = paste0(num(target, 2), ' (', num(se, 2), ')'),
+            `Model F, calibrated demand` = num(model, 2), `Model F, default demand` = num(default, 2)) %>% kable(align = 'lrrr')
+```
+
+- **The fit is close, and at the inelastic end of the grid.**
+    - Two of the three chosen values are the grid's lowest.
+    - T6's estimates are biased towards −1 by division bias, so the true elasticities are probably a little higher. This setting is the pessimistic end for jobs.
+
+**What changes.**
+
+- **National gains fall below Hulten everywhere, by about the same factor.**
+    - A 5% gain now gives `r num(min(e1c$r), 2)`–`r num(max(e1c$r), 2)` times the Domar prediction in every group, against 0.8–1.4 with the default.
+    - With foreign demand inelastic, exporters' gains no longer come with better terms of trade.
+    - With inputs complementary, a cheaper input does less.
+    - So the national ranking simply follows the Domar weights (T2): construction, finance and professional services first (`r pct(e1c_g('construction', 'd_welfare'), 2)`, `r pct(e1c_g('finance', 'd_welfare'), 2)`, `r pct(e1c_g('professional', 'd_welfare'), 2)`).
+- **Productivity now costs the improving group jobs, nationally,** outside the tradable groups: construction `r pct(e1c_g('construction', 'd_group_jobs'), 1)`, utilities `r pct(e1c_g('utilities', 'd_group_jobs'), 1)`, retail `r pct(e1c_g('retail', 'd_group_jobs'), 1)`, transport `r pct(e1c_g('transport', 'd_group_jobs'), 1)`. Electronics, machinery and vehicles gain `r pct(e1c_g('machinery_vehicles', 'd_group_jobs'), 1)`.
+- **The break-even ratios narrow (T10).**
+
+```{r}
+#| label: tbl-md-breakeven
+#| tbl-cap: "Break-even cost ratios against the frontier push (P1), national real income per point, people mobile: the default demand and the demand calibrated to T6, under both trade closures. Model F's closure: mean of three draws; Rice and Venables's: one draw."
+rvd <- mf_closure_proxies %>% filter(grepl('Rice', closure), mobility == 'frechet', proxy != 'P1 frontier push') %>%
+  transmute(Proxy = sub(' .*', '', proxy), `Default, R and V closure` = num(breakeven_vs_P1, 2))
+be %>% filter(mobility == 'frechet', !grepl('^P1', experiment)) %>%
+  transmute(Proxy = sub(' .*', '', experiment), key = paste(ifelse(grepl('Default', demand), 'Default', 'Calibrated'),
+                                                             ifelse(grepl('fixed', closure), 'Model F closure', 'R and V closure'), sep = ', '),
+            v = num(breakeven, 2)) %>%
+  pivot_wider(names_from = key, values_from = v) %>% left_join(rvd, by = 'Proxy') %>%
+  mutate(Proxy = recode(Proxy, P2 = 'P2 long tail', P3 = 'P3 upstream (business-to-business)', P4 = 'P4 local services')) %>%
+  select(Proxy, `Default, Model F closure`, `Default, R and V closure`, `Calibrated, Model F closure`, `Calibrated, R and V closure`) %>%
+  kable(align = 'lrrrr')
+```
+
+- **With realistic demand, upstream business-to-business productivity is roughly level with a frontier push per point, under either closure:** `r num(beg('P3', 'Calibrated', 'fixed'), 2)` with Model F's closure, `r num(beg('P3', 'Calibrated', 'Rice'), 2)` with Rice and Venables's.
+    - Local services need points `r pct(1 - beg('P4', 'Calibrated', 'fixed'))` cheaper with Model F's closure, and are about level with Rice and Venables's (`r num(beg('P4', 'Calibrated', 'Rice'), 2)`).
+    - The long tail needs points `r pct(1 - beg('P2', 'Calibrated', 'fixed'))` cheaper with Model F's closure and `r pct(1 - beg('P2', 'Calibrated', 'Rice'))` cheaper with Rice and Venables's.
+- **The closure matters less once demand is realistic,** because inelastic foreign demand takes away most of what it decided. What was a reversal becomes a band.
+- **Locally, little changes.**
+    - With people immobile, the lagging place still keeps most of the gain from local services: retail `r pct(e2c_g('retail', 'immobile', 'lag_gain_share'))`, hospitality `r pct(e2c_g('hospitality', 'immobile', 'lag_gain_share'))`.
+    - It keeps less from finance (`r pct(e2c_g('finance', 'immobile', 'lag_gain_share'))`) and electronics, machinery and vehicles (`r pct(e2c_g('machinery_vehicles', 'immobile', 'lag_gain_share'))`).
+    - With people mobile, it keeps little of anything.
+- **A caveat this exposes.**
+    - When only the lagging place improves its local services, it gains jobs in them (retail `r pct(e2c_g('retail', 'immobile', 'lag_d_group_jobs'), 1)` with people immobile), and can keep more than the whole national gain.
+    - It draws customers from the other places. Rice and Venables's elasticity between places (10) applies to local services too, so even a small cross-border share is very price-sensitive.
+    - That is probably too strong for hairdressers and cafés.
+
+```{r}
+#| label: ls-setup
+source('code/tradeable_jobs/24_modelF_local_sigma.R')
+lsg <- function(grp, mob, col, v = 'services 3') ls_e2[[col]][ls_e2$group == grp & ls_e2$mobility == mob & grepl(v, ls_e2$variant)]
+lsb <- function(px, mob = 'frechet', v = 'services 3') ls_breakeven$breakeven[grepl(px, ls_breakeven$experiment) & ls_breakeven$mobility == mob & grepl(v, ls_breakeven$variant)]
+```
+
+- **The fix: an elasticity between places of `r ls_sigma_local` for local services,** with their trade costs moved so the share bought from other places is unchanged.
+    - When the lagging place alone improves its local services, their jobs there now fall slightly, as T6 says they should: retail `r pct(lsg('retail', 'immobile', 'lag_d_group_jobs'), 1)`, hospitality `r pct(lsg('hospitality', 'immobile', 'lag_d_group_jobs'), 1)`, against `r pct(lsg('retail', 'immobile', 'lag_d_group_jobs', 'between places 10'), 1)` and `r pct(lsg('hospitality', 'immobile', 'lag_d_group_jobs', 'between places 10'), 1)` before.
+    - With people immobile, the place keeps `r pct(min(lsg('hospitality', 'immobile', 'lag_gain_share'), lsg('retail', 'immobile', 'lag_gain_share'), lsg('arts_personal', 'immobile', 'lag_gain_share')))`–`r pct(max(lsg('hospitality', 'immobile', 'lag_gain_share'), lsg('retail', 'immobile', 'lag_gain_share'), lsg('arts_personal', 'immobile', 'lag_gain_share')))` of the national gain, and no longer more than all of it.
+- **Nationally, almost nothing changes.** Price sensitivity between places only matters when one place moves alone. The break-even ratios with people mobile become: long tail `r num(lsb('P2'), 2)`, upstream `r num(lsb('P3'), 2)`, local services `r num(lsb('^P4 local'), 2)`.
+
+```{r}
+#| label: ag-setup
+source('code/tradeable_jobs/26_modelF_agglomeration.R')
+agb <- function(px, k, mob = 'frechet') ag_breakeven$breakeven[grepl(px, ag_breakeven$experiment) & ag_breakeven$kappa == k & ag_breakeven$mobility == mob]
+agl <- function(k, mob, type) ag_e2_type$mean_gain_share[ag_e2_type$kappa == k & ag_e2_type$mobility == mob & ag_e2_type$type == type]
+```
+
+**Agglomeration.**
+
+- **The setting.** On the same calibrated setting, productivity in a place-sector now rises with its employment, at elasticities of 0.02 and 0.03. Model F solves at both, in all `r nrow(ag)` runs; round 1's engine couldn't go beyond 0.03.
+- **It tilts the comparison slightly towards the frontier push,** which concentrates where tradables already cluster. Going from no agglomeration to 0.03, the break-even ratios (people mobile) move:
+    - long tail `r num(agb('P2', 0), 2)` to `r num(agb('P2', 0.03), 2)`;
+    - upstream `r num(agb('P3', 0), 2)` to `r num(agb('P3', 0.03), 2)`;
+    - local services `r num(agb('^P4 local', 0), 2)` to `r num(agb('^P4 local', 0.03), 2)`.
+- **How much of a local gain stays local doesn't change.** With people immobile, the lagging place keeps on average `r pct(agl(0.03, 'immobile', 'local services'))` of the gain from its local services and `r pct(agl(0.03, 'immobile', 'other groups'))` from other groups, as without agglomeration.
+- **What it doesn't test.** Agglomeration strong enough to create multiple equilibria is beyond Model F's own solver. Section 18's new solvers handle it.
+
+## 17. The flow model in R, and local against national when the economy is slack (F0, T9)
+
+```{r}
+#| label: flow-setup
+source('code/tradeable_jobs/22_flow_model.R')
+source('code/tradeable_jobs/23_t9_flow_slack.R')
+fc <- fm_check_summary %>% group_by(table) %>% summarise(rows = sum(rows), missing = sum(missing), max_rel = max(max_rel_diff), .groups = 'drop')
+fx <- function(pol, eco, pl, col, ver = 'Original') t9f[[col]][grepl(pol, t9f$policy, fixed = TRUE) & grepl(eco, t9f$economy) &
+                                                                t9f$place == pl & grepl(ver, t9f$version)]
+```
+
+**The port (F0).**
+
+- **What the model is.** The "where GVA is booked" flow model is a four-place model: a core city, a manufacturing town, a rural area and the rest of the world.
+    - Output follows demand, with fixed input coefficients and markup pricing.
+    - Profits are booked by firm and paid to owners by place, and households spend out of income and money.
+    - Wages and prices don't respond to unemployment.
+- **The port.** It is now in R (`functions_flow.R`), translated function by function from its TypeScript build. Its inputs, the calibrated parameters and the ten experiments, are exported from the TypeScript as JSON.
+- **It reproduces the original.** Across the baseline and all ten experiments, every standard results row at eight periods matches the TypeScript's own output: `r num(sum(fc$rows))` rows, none missing.
+    - The largest relative difference is `r formatC(max(fc$max_rel[fc$table != 'money']), format = 'e', digits = 1)` for economy and place rows, and `r formatC(fc$max_rel[fc$table == 'producer'], format = 'e', digits = 1)` for producers.
+    - Money stocks match to `r formatC(fc$max_rel[fc$table == 'money'], format = 'e', digits = 1)` of the rounding floor.
+    - All eleven runs take a few seconds.
+- **Not ported:** the lenses beyond the standard results rows, and the calibration routine (the stored calibration is used).
+
+**The slack-economy experiments (T9).**
+
+- **What was run.** Each policy starts at period 5 and is compared at period 40 with the same economy without it. It is run in the base economy (5% unemployment everywhere) and in a slack one (all exports down 20% from period 1, unemployment `r pct(fx('D1', 'Slack', 'all', 'cf_unemployment_rate'))`).
+- **Real income.** Disposable income is deflated by each place's own cost of living (its base-year household basket).
+
+```{r}
+#| label: tbl-flow-t9
+#| tbl-cap: "Flow model, slack economy (exports down 20%): each policy's effect at period 40 against the same economy without it. National GDP (the official lens), unemployment (percentage points), real disposable income, and the town's share of the national change in real disposable income."
+t9f %>% filter(grepl('Slack', economy), place == 'all', grepl('Original', version)) %>%
+  transmute(Policy = policy, `GDP` = paste0(num(100 * d_gva_pct, 2), '%'), `Unemployment (points)` = num(100 * d_unemployment_rate, 2),
+            `Real disposable income` = paste0(num(100 * d_real_di_pct, 2), '%'),
+            `Town's share of the real gain` = ifelse(abs(d_real_di) < 1e3, '', pct(town_share_of_real_gain))) %>%
+  kable(align = 'lrrrr')
+```
+
+- **When demand is the constraint, demand policy raises local incomes, and keeps much of the gain local.**
+    - Inward investment in the town (component exports +20%) raises national GDP `r pct(fx('D1', 'Slack', 'all', 'd_gva_pct'), 2)` and cuts unemployment by `r num(-100 * fx('D1', 'Slack', 'all', 'd_unemployment_rate'), 2)` points. The town keeps `r pct(fx('D1', 'Slack', 'all', 'town_share_of_real_gain'))` of the real gain.
+    - Local procurement in the town alone keeps `r pct(fx('D2t', 'Slack', 'all', 'town_share_of_real_gain'))` there. Procurement everywhere spreads the gain roughly by population (the town keeps `r pct(fx('D2 ', 'Slack', 'all', 'town_share_of_real_gain'))`).
+- **Productivity gains with demand unchanged cost jobs and measured GDP.** The output still has to be bought, so fewer workers make it, and they stay unemployed.
+- **The real gain depends on who buys the output.**
+    - **Everyday services, local buyers.** Productivity in the town's everyday services lowers its cost of living `r pct(-fx('S2', 'Slack', 'M', 'd_cpi_pct'), 1)`.
+        - Real income rises `r pct(fx('S2', 'Slack', 'all', 'd_real_di_pct'), 2)` nationally, almost all of it in the town (`r pct(fx('S2', 'Slack', 'all', 'town_share_of_real_gain'))`).
+        - Meanwhile GDP falls `r pct(-fx('S2', 'Slack', 'all', 'd_gva_pct'), 2)` and unemployment rises `r num(100 * fx('S2', 'Slack', 'all', 'd_unemployment_rate'), 2)` points.
+        - The official lens and the real one point in opposite directions, as in Model F (T8).
+    - **Exporters.** Productivity in an exporter is a loss.
+        - The model's exports are fixed quantities, so a lower price only cuts export revenue: the town's components `r pct(fx('S1', 'Slack', 'all', 'd_real_di_pct'), 2)` real income, the city's business services `r pct(fx('S4', 'Slack', 'all', 'd_real_di_pct'), 2)`.
+        - That is the flow model's extreme version of the terms-of-trade effect in section 11. With price-elastic exports it would be smaller or reversed.
+- **In the original model, slack and tight barely differ.**
+    - Results in the base economy are within about a tenth of a point of the slack ones (inward investment raises GDP `r pct(fx('D1', 'Base', 'all', 'd_gva_pct'), 2)` there, against `r pct(fx('D1', 'Slack', 'all', 'd_gva_pct'), 2)`).
+    - Wages and prices don't respond to unemployment, so tightness never bites.
+
+**A tight economy too: the extended flow model.**
+
+- **Two extensions, both switched off for the port's check:**
+    - export quantities that respond to price, with elasticity 2 (Model F's calibration to T6);
+    - wages that follow a wage curve on local unemployment (elasticity 0.1), moving 30% of the way each period. Without the gradual adjustment a tight economy cycles: high wages cut exports, which cuts jobs, which cuts wages.
+- **The three economies at period 40:** slack (exports down 20%) at `r pct(fx('D1', 'Slack', 'all', 'cf_unemployment_rate', 'Extended'), 1)` unemployment, base at 5%, and tight (exports up 20%) at `r pct(fx('D1', 'Tight', 'all', 'cf_unemployment_rate', 'Extended'), 1)`.
+
+```{r}
+#| label: tbl-flow-tight
+#| tbl-cap: "Extended flow model (price-elastic exports, wage curve): each policy's effect at period 40 in the slack and the tight economy. Real disposable income nationally, the town's share of it, and the change in wages (average across producers)."
+t9f %>% filter(grepl('Extended', version), place == 'all', !grepl('Base', economy)) %>%
+  mutate(economy = ifelse(grepl('Slack', economy), 'Slack', 'Tight')) %>%
+  transmute(Policy = policy, economy, ri = paste0(num(100 * d_real_di_pct, 2), '%'),
+            town = ifelse(abs(d_real_di) < 1e3, '', pct(town_share_of_real_gain)), wage = paste0(num(100 * (wage_index - 1), 1), '%')) %>%
+  pivot_wider(names_from = economy, values_from = c(ri, town, wage)) %>%
+  select(Policy, `Real income, slack` = ri_Slack, `Real income, tight` = ri_Tight, `Town's share, slack` = town_Slack,
+         `Town's share, tight` = town_Tight, `Wages, slack` = wage_Slack, `Wages, tight` = wage_Tight) %>%
+  kable(align = 'lrrrrrr')
+```
+
+- **In a tight economy, local demand policy crowds out other places.**
+    - Town-only procurement raises the town's wages and prices. The town gets `r pct(fx('D2t', 'Tight', 'all', 'town_share_of_real_gain', 'Extended'))` of the national real gain, so the other places lose.
+    - In the slack economy the town keeps `r pct(fx('D2t', 'Slack', 'all', 'town_share_of_real_gain', 'Extended'))`, and nobody loses.
+    - This is Venables's crowding-out claim (C13), appearing where the labour market is tight and not where it's slack.
+- **In a tight economy, local services productivity no longer pays the town.**
+    - In the slack and base economies the town keeps most of the real gain from its everyday services: `r pct(fx('S2', 'Slack', 'all', 'town_share_of_real_gain', 'Extended'))` and `r pct(fx('S2', 'Base', 'all', 'town_share_of_real_gain', 'Extended'))`.
+    - In the tight one, the freed workers push local wages down through the wage curve. The town's own real income doesn't rise, and the small national gain (`r pct(fx('S2', 'Tight', 'all', 'd_real_di_pct', 'Extended'), 2)`) lands elsewhere.
+- **With price-elastic exports, business-service productivity pays.** In the city's business services, which sell to firms and abroad, it raises national real income `r pct(fx('S4', 'Slack', 'all', 'd_real_di_pct', 'Extended'), 2)` (slack) to `r pct(fx('S4', 'Tight', 'all', 'd_real_di_pct', 'Extended'), 2)` (tight). In the original model, with fixed export quantities, it was a loss. The upstream channel needs price-elastic buyers, as in Model F.
+- **The two models still bracket the question.** The flow model is the demand-constrained case and Model F the full-employment case, and the extended flow model shows how the answer moves as a place tightens.
+
+**Local against national, across the two models.**
+
+- **When output is limited by demand (flow model):**
+    - demand-side policies raise both local and national income, and a place's own procurement keeps most of the gain local;
+    - productivity gains in local services raise local real income through lower prices but cost local jobs;
+    - productivity gains in exporters can lose income when export demand doesn't respond to price.
+- **When people are fully employed (Model F):**
+    - productivity gains raise national real income;
+    - whether they stay local depends on mobility: little stays when people move, most stays from local services when they don't.
+- **The hypothesis holds in both models in one form.** Productivity in local everyday services raises real incomes where it happens, and the official lens hides it. But how much that is worth to a place depends on whether the jobs it frees are taken up (Model F) or lost (flow model).
+
+## 18. Solving with strong agglomeration: multiple equilibria
+
+```{r}
+#| label: sv-setup
+source('code/tradeable_jobs/27_solvers.R')
+fb <- function(m, col) sv_test$found_by[[col]][sv_test$found_by$method == m]
+bif <- sv_bifurcation %>% group_by(vartheta) %>% summarise(first_unstable = min(kappa[sym_max_real_eigen > 0]), .groups = 'drop')
+fp <- sv_full$direct %>% left_join(sv_full$continuation, by = 'kappa')
+fm <- sv_full$multi
+fpol <- sv_full$policies
+source('code/tradeable_jobs/28_strong_agglomeration_draws.R')
+sdb <- function(p, col) sd_by_proxy[[col]][grepl(paste0('^', p, ' '), sd_by_proxy$proxy)]
+sdq <- sd_policies %>% filter(proxy == 'P2 long tail') %>% group_by(seed) %>% filter(any(switched), any(!switched)) %>%
+  summarise(sw = mean(breakeven[switched]), not = mean(breakeven[!switched]), .groups = 'drop')
+sd_p1 <- sd_policies %>% filter(proxy == 'P1 frontier push')
+sd_esc <- sd_p1 %>% filter(switched) %>% slice_max(gain_per_point, n = 1)
+sd_esc_other <- sd_p1 %>% filter(seed == sd_esc$seed, !switched)
+sd_esc_be <- sd_policies %>% filter(seed == sd_esc$seed, eq == sd_esc$eq, !grepl('^P1', proxy))
+sd_p1_sw <- sd_p1 %>% filter(switched, seed != sd_esc$seed) %>% slice(1)
+sd_p1_ref <- sd_p1 %>% filter(seed == sd_p1_sw$seed, !switched)
+sd_spread <- sd_summary %>% mutate(s = welfare_max / welfare_min - 1)
+```
+
+**The solvers before this section.** Each model had one solver:
+
+- Venables's cities: a grid scan of the non-tradable price, then root-finding.
+- Model B: Newton's method from fresh starts.
+- Rice and Venables and Model F: damped wage adjustment from a single start.
+- DFS: root-finding.
+- The flow model: fixed-point iteration.
+
+Only the first two looked for more than one solution. With agglomeration, Model F can have several equilibria, and its solver finds at most one: the one near its start.
+
+**What was added** (`functions_solvers.R`).
+
+- **The split.** Model F is split into an inner problem and an outer map.
+    - Inner: wages, prices and rents with labour fixed in every place-sector, which stays well behaved however strong agglomeration is.
+    - Outer: the allocation workers would choose given the resulting utilities. Equilibria are the fixed points of that map.
+- **Four ways to search:**
+    - **hill climbing:** damped moves towards higher utility, from many random starts. It finds stable equilibria, the ones an economy would settle into.
+    - **residual search:** minimise the gap between an allocation and the one it implies (Nelder–Mead, then Newton). It finds unstable equilibria too.
+    - **brute force:** evaluate that gap on a grid over every allocation, and polish every local minimum. It misses nothing coarser than the grid, but only works for small problems.
+    - **continuation:** raise a parameter in small steps, each solved from the last step's equilibrium.
+- **Stability.** Each equilibrium is tested by perturbing it and checking that hill climbing returns. Interior equilibria also get the eigenvalue test.
+- **Corners.** Agglomeration in Rice and Venables's form, productivity proportional to (employment)^κ, sends productivity to zero as a place-sector empties. So strong agglomeration gives corner equilibria with complete specialisation, which the search judges in shares rather than logs.
+
+**A test with a known answer.** Two identical places and two identical tradable sectors, with agglomeration 0.3 and mobility 50. Theory says there are three equilibria:
+
+- each place half of each sector, unstable;
+- two mirror-image equilibria with each place specialised, stable.
+
+```{r}
+#| label: tbl-sv-test
+#| tbl-cap: "The test case's equilibria and which methods found them. Shares are place 1 sector 1, place 2 sector 1, place 1 sector 2, place 2 sector 2."
+sv_test$equilibria %>% transmute(`Shares of workers` = x, `Found by` = methods, Stable = ifelse(stable, 'yes', 'no'),
+                                 `Largest eigenvalue` = ifelse(is.na(max_real_eigen), '', num(max_real_eigen, 2)), Welfare = num(welfare, 3)) %>%
+  kable(align = 'llrrr')
+```
+
+- **The model's own solver gets this wrong.**
+    - From its default (even) start it reports convergence at the symmetric equilibrium, which is unstable.
+    - From `r sum(sv_test$direct$start != 'default (even)')` asymmetric starts it fails every time.
+- **Each new method sees part of the picture.**
+    - Hill climbing finds both stable equilibria (`r fb('Hill climb', 'converged')` of `r fb('Hill climb', 'starts')` starts converge).
+    - Residual search finds only the unstable one, because Newton's method can't reach corners.
+    - Brute force over `r num(sv_test$grid_points)` grid points finds all three.
+- **Specialisation is better.** Welfare is `r pct(max(sv_test$equilibria$welfare) / min(sv_test$equilibria$welfare) - 1, 1)` higher in a specialised equilibrium than in the symmetric one.
+- **Where multiple equilibria start.** The symmetric equilibrium becomes unstable at agglomeration of about `r paste0(bif$first_unstable, ' (mobility ', bif$vartheta, ')', collapse = ', ')`. The more mobile people are, the weaker the agglomeration needed.
+
+**The full Model F with strong agglomeration.** This uses the best-calibrated setting (demand fitted to T6, elasticity 3 between places for local services), one productivity draw, people mobile, with agglomeration raised from 0 to 0.3.
+
+- **The model's own solver fails from agglomeration `r min(fp$kappa[!fp$direct_converged])`.**
+    - Continuation solves every step to 0.3, in `r min(fp$iterations)`–`r max(fp$iterations)` iterations a step.
+    - Welfare rises with agglomeration, from `r num(fp$welfare[fp$kappa == min(fp$kappa)], 2)` to `r num(fp$welfare[fp$kappa == 0.3], 2)`.
+- **Multiple equilibria appear between 0.1 and 0.2.** From eight scrambled starts each:
+    - at 0.1, every start returns to the continuation equilibrium;
+    - at 0.2 there are `r sum(fm$kappa == 0.2)` stable equilibria, at 0.3 `r sum(fm$kappa == 0.3)`.
+- **They differ in where activity sits, not much in welfare.**
+    - At 0.3 the largest difference is `r pct(max(fm$max_share_gap[fm$kappa == 0.3]), 1)` of all workers in one place-sector (finance leaving place 11), a large move for a cell that holds well under 1% of workers on average.
+    - Welfare across them differs by under `r pct(max(fm$welfare[fm$kappa == 0.3]) / min(fm$welfare[fm$kappa == 0.3]) - 1, 1)`.
+    - Continuation's equilibrium is not the best of them.
+
+```{r}
+#| label: tbl-sv-policies
+#| tbl-cap: "Full Model F, agglomeration 0.3: break-even cost ratios against the frontier push (P1), national welfare per point, starting from each of the four equilibria found. The economy adjusts from that equilibrium by hill climbing."
+fpol %>% transmute(eq = paste('Equilibrium', eq), proxy, v = num(breakeven, 2)) %>% filter(!grepl('^P1', proxy)) %>%
+  pivot_wider(names_from = eq, values_from = v) %>% rename(Proxy = proxy) %>% kable(align = 'lrrrr')
+```
+
+- **Which equilibrium the economy is in changes the answer for the long tail.**
+    - From two of the four, the long-tail proxy tips the economy into another equilibrium, moving `r pct(max(fpol$moved[fpol$proxy == 'P2 long tail']), 1)` of workers.
+    - It gains from the move: break-even `r num(max(fpol$breakeven[fpol$proxy == 'P2 long tail']), 2)`.
+    - From the other two, where that move has already happened, it is `r num(min(fpol$breakeven[fpol$proxy == 'P2 long tail']), 2)`.
+- **The upstream and local-services proxies hardly depend on the starting point** (`r num(min(fpol$breakeven[fpol$proxy == 'P3 upstream']), 2)`–`r num(max(fpol$breakeven[fpol$proxy == 'P3 upstream']), 2)` and `r num(min(fpol$breakeven[fpol$proxy == 'P4 local services']), 2)`–`r num(max(fpol$breakeven[fpol$proxy == 'P4 local services']), 2)`).
+**Over six productivity draws** (script 28). The same setting and steps for draws `r min(sd_summary$seed)`–`r max(sd_summary$seed)`: continuation to agglomeration 0.3, six scrambled starts, then the four proxies from every stable equilibrium found.
+
+- **Every draw has more than one stable equilibrium:** `r min(sd_summary$stable)` to `r max(sd_summary$stable)`, `r sum(sd_summary$stable)` in all.
+    - Continuation solved every step in every draw, and every start converged.
+    - `r sum(sd_equilibria$hits == 1)` of the `r nrow(sd_equilibria)` were found by a single start, so more starts would probably find more. The counts are lower bounds.
+- **As in the single draw, they differ in where activity sits more than in welfare.**
+    - The largest shift between two equilibria of a draw is `r pct(min(sd_summary$max_share_gap), 1)`–`r pct(max(sd_summary$max_share_gap), 1)` of all workers in one place-sector.
+    - Welfare differs by at most `r pct(sort(sd_spread$s, decreasing = TRUE)[2], 1)` within a draw, except in draw `r sd_spread$seed[which.max(sd_spread$s)]` (`r pct(max(sd_spread$s), 1)`).
+
+```{r}
+#| label: tbl-sd-proxies
+#| tbl-cap: "Full Model F, agglomeration 0.3, six productivity draws: how often each proxy tips the economy into another equilibrium (some place-sector's share of all workers moves by more than 1 point), and its break-even cost ratio against the frontier push (P1) from the same starting equilibrium."
+sd_by_proxy %>% transmute(Proxy = proxy,
+                          `Switched (of starting equilibria)` = paste0(n_switched, ' of ', cases),
+                          `Draws with a switch` = draws_switched,
+                          `Break-even: mean (range)` = ifelse(grepl('^P1', proxy), '1 (reference)',
+                                                              paste0(num(breakeven_mean, 2), ' (', num(breakeven_min, 2), '–', num(breakeven_max, 2), ')')),
+                          `When it switched` = ifelse(grepl('^P1', proxy) | is.na(breakeven_if_switched), '', num(breakeven_if_switched, 2)),
+                          `When it didn't` = ifelse(grepl('^P1', proxy), '', num(breakeven_if_not, 2))) %>%
+  kable(align = 'lrrrrr')
+```
+
+- **Switching is common for the long tail, rare for the frontier push, absent for the rest.**
+    - The long-tail proxy tips the economy from `r sdb('P2', 'n_switched')` of `r sdb('P2', 'cases')` starting equilibria, in `r sdb('P2', 'draws_switched')` of the `r nrow(sd_summary)` draws.
+    - The frontier push does so from `r sdb('P1', 'n_switched')`. Upstream and local services never do: no place-sector's share moves by more than `r pct(max(sdb('P3', 'moved_max'), sdb('P4', 'moved_max')), 2)`.
+    - That fits how the proxies are built. The long tail raises the weakest place-sectors, which can change which places are big enough to gain from agglomeration. The frontier push raises the places already ahead.
+- **The long tail gains when it switches.**
+    - Its break-even is `r num(sdb('P2', 'breakeven_if_switched'), 2)` when it tips the economy and `r num(sdb('P2', 'breakeven_if_not'), 2)` when it doesn't.
+    - The comparison holds within draws: in the `r nrow(sdq)` draws where it switches from some equilibria and not others, `r paste0(num(sdq$sw, 2), ' against ', num(sdq$not, 2), collapse = ' and ')`.
+    - It isn't escaping bad equilibria. Where it switches, the starting equilibrium is `r pct(-mean(sd_policies$start_welfare_vs_best[sd_policies$proxy == 'P2 long tail' & sd_policies$switched]), 1)` below the draw's best on average, the same as where it doesn't.
+- **The frontier push's one big switch is an escape.**
+    - In draw `r sd_esc$seed` the economy starts in that draw's worst equilibrium, `r pct(-sd_esc$start_welfare_vs_best, 1)` below the best.
+    - The frontier push tips it out: `r num(sd_esc$gain_per_point, 2)` welfare points per point of productivity, against `r num(min(sd_esc_other$gain_per_point), 2)`–`r num(max(sd_esc_other$gain_per_point), 2)` from the draw's other equilibria.
+    - No other proxy tips it, so there their break-evens are the lowest anywhere (`r num(min(sd_esc_be$breakeven), 2)`–`r num(max(sd_esc_be$breakeven), 2)`).
+    - Its other switch, in draw `r sd_p1_sw$seed`, didn't pay: `r num(sd_p1_sw$gain_per_point, 2)` per point, against `r num(min(sd_p1_ref$gain_per_point), 2)`–`r num(max(sd_p1_ref$gain_per_point), 2)` from that draw's other equilibria.
+- **On average, strong agglomeration changes little.** Mean break-evens over the `r sdb('P2', 'cases')` starting points are `r num(sdb('P2', 'breakeven_mean'), 2)`, `r num(sdb('P3', 'breakeven_mean'), 2)` and `r num(sdb('P4', 'breakeven_mean'), 2)` for the long tail, upstream and local services. With agglomeration 0.03 they were `r num(pick(ag_breakeven %>% filter(mobility == 'frechet', kappa == 0.03), 'P2'), 2)`, `r num(pick(ag_breakeven %>% filter(mobility == 'frechet', kappa == 0.03), 'P3'), 2)` and `r num(pick(ag_breakeven %>% filter(mobility == 'frechet', kappa == 0.03), 'P4'), 2)` (section 16, three draws). What strong agglomeration adds is the spread.
+
+- **What this means.**
+    - With strong agglomeration, policy can shift an economy between equilibria, and a policy's measured effect then depends on the history it starts from.
+    - Over six draws that matters more for broad catch-up than for the frontier push. The long tail tips the economy far more often, and gains when it does. That is the reverse of the usual cluster argument, in which backing the leaders is how a policy exploits agglomeration.
+    - But it cuts both ways: the largest single gain from a switch is the frontier push's, out of a bad equilibrium. Neither side can count on history.
+    - Agglomeration far stronger than estimates suggest, and six draws of a 12-place economy, still make this an illustration, not a finding about the UK.
+
+## 19. What is not done yet
+
+- **The flow model's lenses** beyond the standard results rows (chains, booking, measurement), and its calibration routine. The model itself is ported and validated (section 17).
+- **Calibrating the flow model's extensions.** The export elasticity and wage curve are set from Model F and the literature, not fitted to the flow model's own economy.
+- **Model F extensions.**
+    - More starts per draw with strong agglomeration: most of section 18's equilibria were found by a single start, so there are probably more.
+    - A pass-through switch calibrated on T11a, so that firms keep part of a gain instead of passing it all to prices.
+    - Equal-cost (rather than equal-percentage) proxies once T10's ratios have been argued over.
+- **The regional version of T3, and T5's local multipliers.** Both need regional input–output coefficients that the payment flows can't supply.
+- **The household round of T5,** and the "pound walking" comparison.
+
+## Sources
+
+- **Input–output tables:** ONS, [UK input–output analytical tables, product by product, 2019](https://www.ons.gov.uk/economy/nationalaccounts/supplyandusetables/datasets/ukinputoutputanalyticaltablesdetailed).
+- **Employment:** BRES employees by SIC 3-digit group and NUTS 2016 level 3, 2015–2019, from [Nomis](https://www.nomisweb.co.uk/) (dataset NM_189_1).
+- **Payment flows:** ONS, [Industry to industry payment flows by region, UK](https://www.ons.gov.uk/economy/economicoutputandproductivity/output/datasets/industrytoindustrypaymentflowsbyregionuk) (official statistics in development, from Pay.UK data), editions 2019–2021, 2022–2024 and 2025–2026.
+- **Scotland:** Scottish Government, [Supply, use and input–output tables, 1998–2022](https://www.gov.scot/publications/input-output-latest/) (the detailed imports and exports tables, and the output and supply table).
+- **Trade between regions:** ONS, [Interregional trade in goods and services, UK, 2019](https://www.ons.gov.uk/businessindustryandtrade/internationaltrade/datasets/interregionaltradeingoodsandservicesuk) (official statistics in development).
+- **Productivity by industry:** ONS, [Labour productivity by industry division](https://www.ons.gov.uk/economy/economicoutputandproductivity/productivitymeasures/datasets/labourproductivitybyindustrydivision), Q4 2020 edition (experimental).
+- **Firm data (section 8):** Companies House accounts (open data), as processed in the companieshouseopen project's report outputs; read in place, with the aggregate tables kept in the gitignored `local/` folder because they are rebuilt from that project.
+- **The models:** Rice and Venables (2023), as rebuilt in round 1 ([tradeable_jobs_firstlook.qmd](tradeable_jobs_firstlook.qmd)); the "where GVA is booked" flow model (modelling_demand, model spec v1), ported from its TypeScript build (modelling repo, commit 70c3804).
+
+*Code: `code/tradeable_jobs/functions_io.R`, `functions_ch.R`, `functions_payments.R`, `functions_modelF.R`, `functions_solvers.R` and `functions_flow.R` (with its inputs in `flow_model/`), and scripts `12` to `28`. Outputs: `docs/chunks/tradeable_jobs/outputs/` (`t2_*` to `t11b_*` and `mf_*`); T11a's tables stay in the gitignored `local/tradeable_jobs/companieshouse/`. Plan and log: [tradeable_jobs_further_tests_plan.md](tradeable_jobs_further_tests_plan.md).*
